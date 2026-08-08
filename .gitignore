@@ -1,0 +1,55 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+service-account*.json
+secrets.*
+private.*
+
+# Local AIONEX audit artifacts
+.aionex-baseline-manifest.json
+.aionex-audit/
+
+# Python environments and caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Runtime and local data artifacts
+*.log
+logs/
+uploads/
+tmp/
+temp/
+cache/
+# Supplied challenge dataset: provenance and redistribution rights are unverified.
+hospital_crisis_realistic_dataset_50000.csv
+*.sqlite
+*.sqlite3
+*.db
+
+# Build and packaging output
+build/
+dist/
+*.egg-info/
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+desktop.ini
