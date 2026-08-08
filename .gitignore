@@ -38,6 +38,8 @@ temp/
 cache/
 # Supplied challenge dataset: provenance and redistribution rights are unverified.
 hospital_crisis_realistic_dataset_50000.csv
+# Deterministic demo data is regenerated locally from scripts/.
+data/citycare_demo_dataset.csv
 *.sqlite
 *.sqlite3
 *.db

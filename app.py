@@ -7,26 +7,26 @@
 # It does not read the dataset, does not clean data and does not train models.
 # =============================================================================
 
-import os
+import ipaddress
 import json
 import math
-import traceback
-import urllib.request
+import os
 import urllib.error
+import urllib.parse
+import urllib.request
 
 import numpy as np
 import pandas as pd
-
-from flask import Flask, render_template, request, jsonify
-
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.ensemble import RandomForestClassifier
+from flask import Flask, jsonify, render_template, request
+from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
 from sklearn.linear_model import LinearRegression
-from sklearn.metrics import r2_score
-from sklearn.metrics import mean_absolute_error
-from sklearn.metrics import accuracy_score
-from sklearn.metrics import f1_score
-from sklearn.metrics import confusion_matrix
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    mean_absolute_error,
+    r2_score,
+)
 
 # Folder that contains this file. Relative dataset paths are resolved from here.
 APP_FOLDER = os.path.dirname(os.path.abspath(__file__))
@@ -58,9 +58,32 @@ CATEGORY_OPTIONS = {}
 METHODOLOGY_LABEL = "Tree-based machine-learning models for structured crisis data."
 ALLOCATION_METHOD_LABEL = "Transparent priority-based constrained allocation"
 
-# Threshold used to decide whether a weekly historical trend is worsening or improving.
+# Threshold used to decide whether a weekly dataset trend is worsening or improving.
 # The value is a change of the rate (0-1 scale) per week.
 TREND_SLOPE_THRESHOLD = 0.002
+
+# Defensive limits for the small JSON requests served by this application.
+MAX_REQUEST_BODY_BYTES = 128 * 1024
+MAX_AI_RESPONSE_BYTES = 256 * 1024
+MAX_OPERATIONAL_NUMBER = 1_000_000.0
+MAX_RESERVE_UNITS = 1_000_000
+MAX_OBJECTIVE_WEIGHT = 1_000_000.0
+PUBLIC_STARTUP_ERROR = "The service could not initialize. Check the server logs."
+
+# Broad operational maxima prevent float overflows and accidental resource
+# exhaustion while still allowing values far beyond the configured dataset.
+NUMERIC_INPUT_MAXIMUMS = {
+    "incident_distance_km": MAX_OPERATIONAL_NUMBER,
+    "ambulance_arrivals_per_hour": MAX_OPERATIONAL_NUMBER,
+    "patient_arrival_rate": MAX_OPERATIONAL_NUMBER,
+    "avg_treatment_time_min": MAX_OPERATIONAL_NUMBER,
+    "mortality_risk_score": 1.0,
+    "bed_occupancy_rate": 1.0,
+    "icu_occupancy_rate": 1.0,
+    "equipment_usage_rate": 1.0,
+    "nurse_to_patient_ratio": MAX_OPERATIONAL_NUMBER,
+    "doctor_available": MAX_OPERATIONAL_NUMBER,
+}
 
 
 # =============================================================================
@@ -74,9 +97,8 @@ def read_env_file(env_path):
     if not os.path.exists(env_path):
         return False
 
-    env_file = open(env_path, "r", encoding="utf-8")
-    all_lines = env_file.readlines()
-    env_file.close()
+    with open(env_path, encoding="utf-8") as env_file:
+        all_lines = env_file.readlines()
 
     for raw_line in all_lines:
         line = raw_line.strip()
@@ -131,12 +153,48 @@ def get_port_number():
     return port_number
 
 
+def get_host_address():
+    """Return a conservative server bind address, defaulting to loopback."""
+    raw_host = get_setting("HOST", "127.0.0.1")
+    if raw_host == "" or len(raw_host) > 255:
+        return "127.0.0.1"
+    if any(character.isspace() for character in raw_host):
+        return "127.0.0.1"
+    if "/" in raw_host or "\\" in raw_host or "://" in raw_host:
+        return "127.0.0.1"
+    if not all(character.isalnum() or character in (".", "-", ":", "[", "]") for character in raw_host):
+        return "127.0.0.1"
+    return raw_host
+
+
+def is_loopback_host(host_name):
+    """Return True only for localhost or a numeric loopback address."""
+    candidate = str(host_name).strip().lower()
+    if candidate == "localhost":
+        return True
+    if candidate.startswith("[") and candidate.endswith("]"):
+        candidate = candidate[1:-1]
+    try:
+        return ipaddress.ip_address(candidate).is_loopback
+    except ValueError:
+        return False
+
+
 def get_debug_flag():
     """Return True only when DEBUG is clearly switched on in the .env file."""
     raw_debug = get_setting("DEBUG", "false").lower()
     if raw_debug in ["true", "1", "yes", "on"]:
         return True
     return False
+
+
+def get_safe_debug_flag(host_name):
+    """Allow Flask debug mode only when the server is bound to loopback."""
+    debug_requested = get_debug_flag()
+    if debug_requested and not is_loopback_host(host_name):
+        log_internal_event("debug_disabled_for_non_loopback_bind")
+        return False
+    return debug_requested
 
 
 def get_flag(name, default_text):
@@ -163,9 +221,8 @@ def read_env_values(env_path):
         return values
 
     try:
-        env_file = open(env_path, "r", encoding="utf-8")
-        all_lines = env_file.readlines()
-        env_file.close()
+        with open(env_path, encoding="utf-8") as env_file:
+            all_lines = env_file.readlines()
     except OSError:
         return values
 
@@ -180,43 +237,157 @@ def read_env_values(env_path):
 
 
 def get_live_setting(file_values, name, default_value):
-    """Prefer the current .env file so an edited setting works without a restart."""
+    """Prefer an OS-provided value, then a file value, then the default."""
+    if name in os.environ:
+        return str(os.environ[name]).strip()
     if name in file_values:
-        return file_values[name]
-    return get_setting(name, default_value)
+        return str(file_values[name]).strip()
+    return str(default_value).strip()
+
+
+def read_ai_allowed_hosts():
+    """Return the exact public hostnames permitted for AI egress."""
+    raw_value = get_setting("AI_ALLOWED_HOSTS", "api.openai.com")
+    hosts = set()
+    for item in raw_value.split(",")[:32]:
+        host_name = item.strip().lower().rstrip(".")
+        if host_name != "" and len(host_name) <= 253:
+            hosts.add(host_name)
+    return hosts
+
+
+def validate_ai_base_url(raw_url, allowed_hosts):
+    """Validate and normalize an AI endpoint without performing DNS or network I/O."""
+    candidate = str(raw_url).strip()
+    if candidate == "" or len(candidate) > 2048:
+        return "", "AI_BASE_URL is empty or too long."
+    if any(ord(character) < 33 or ord(character) == 127 for character in candidate):
+        return "", "AI_BASE_URL contains unsupported characters."
+
+    try:
+        parsed = urllib.parse.urlsplit(candidate)
+        port_number = parsed.port
+    except (TypeError, ValueError):
+        return "", "AI_BASE_URL is not a valid URL."
+
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        return "", "AI_BASE_URL must use HTTP or HTTPS."
+    if parsed.username is not None or parsed.password is not None:
+        return "", "AI_BASE_URL must not contain user credentials."
+    if parsed.query != "" or parsed.fragment != "":
+        return "", "AI_BASE_URL must not contain a query string or fragment."
+    if parsed.hostname is None:
+        return "", "AI_BASE_URL must contain a hostname."
+
+    host_name = parsed.hostname.lower().rstrip(".")
+    loopback = is_loopback_host(host_name)
+    if scheme == "http" and not loopback:
+        return "", "Non-loopback AI endpoints must use HTTPS."
+    if not loopback and host_name not in allowed_hosts:
+        return "", "The AI endpoint hostname is not allowlisted."
+
+    if ":" in host_name:
+        normalized_host = "[" + host_name + "]"
+    else:
+        normalized_host = host_name
+    if port_number is not None:
+        normalized_host = normalized_host + ":" + str(port_number)
+
+    normalized_path = parsed.path.rstrip("/")
+    normalized = urllib.parse.urlunsplit((scheme, normalized_host, normalized_path, "", ""))
+    return normalized, ""
+
+
+def read_bounded_ai_number(name, default_number, minimum, maximum, integer_value=False):
+    """Read a finite, bounded numeric AI setting and return a safe fallback on error."""
+    raw_value = get_setting(name, str(default_number))
+    try:
+        number = float(raw_value)
+    except (TypeError, ValueError):
+        return default_number, name + " must be numeric."
+
+    if not math.isfinite(number) or number < minimum or number > maximum:
+        return default_number, name + " is outside the allowed range."
+    if integer_value and not number.is_integer():
+        return default_number, name + " must be a whole number."
+
+    if integer_value:
+        return int(number), ""
+    return float(number), ""
 
 
 def get_ai_settings():
-    """Read the optional language-model settings straight from the .env file.
-
-    The file is read on every call, so changing AI_MODEL, AI_BASE_URL or
-    AI_API_KEY takes effect on the next request without restarting the server.
-    The same code works with OpenAI, OpenRouter, Groq, Together, a local Ollama
-    server or any other service that speaks the OpenAI chat-completions format.
-    """
-    file_values = read_env_values(ENV_FILE_PATH)
-
-    enabled_text = get_live_setting(file_values, "AI_ENABLED", "false").lower()
-
+    """Read and validate optional language-model settings with OS precedence."""
     settings = {}
-    settings["enabled"] = enabled_text in ["true", "1", "yes", "on"]
-    settings["base_url"] = get_live_setting(file_values, "AI_BASE_URL", "https://api.openai.com/v1")
-    settings["model"] = get_live_setting(file_values, "AI_MODEL", "gpt-4o-mini")
-    settings["api_key"] = get_live_setting(file_values, "AI_API_KEY", "")
+    settings["enabled"] = get_flag("AI_ENABLED", "false")
 
-    settings["timeout_seconds"] = read_setting_number(file_values, "AI_TIMEOUT_SECONDS", 30)
-    settings["max_tokens"] = int(read_setting_number(file_values, "AI_MAX_TOKENS", 700))
-    settings["temperature"] = read_setting_number(file_values, "AI_TEMPERATURE", 0.2)
+    allowed_hosts = read_ai_allowed_hosts()
+    base_url, base_url_error = validate_ai_base_url(
+        get_setting("AI_BASE_URL", "https://api.openai.com/v1"),
+        allowed_hosts,
+    )
+    settings["base_url"] = base_url
+
+    model_name = get_setting("AI_MODEL", "gpt-4o-mini")
+    model_error = ""
+    if model_name == "" or len(model_name) > 200:
+        model_name = "gpt-4o-mini"
+        model_error = "AI_MODEL is empty or too long."
+    settings["model"] = model_name
+
+    api_key = get_setting("AI_API_KEY", "")
+    key_error = ""
+    if len(api_key) > 4096:
+        api_key = ""
+        key_error = "AI_API_KEY is too long."
+    if any(ord(character) < 32 or ord(character) == 127 for character in api_key):
+        api_key = ""
+        key_error = "AI_API_KEY contains unsupported characters."
+    if api_key != "" and base_url.startswith("http://"):
+        key_error = "AI_API_KEY cannot be sent over HTTP."
+    settings["api_key"] = api_key
+
+    timeout_value, timeout_error = read_bounded_ai_number(
+        "AI_TIMEOUT_SECONDS", 30.0, 1.0, 60.0
+    )
+    token_value, token_error = read_bounded_ai_number(
+        "AI_MAX_TOKENS", 700, 1, 4096, integer_value=True
+    )
+    temperature_value, temperature_error = read_bounded_ai_number(
+        "AI_TEMPERATURE", 0.2, 0.0, 2.0
+    )
+    settings["timeout_seconds"] = timeout_value
+    settings["max_tokens"] = token_value
+    settings["temperature"] = temperature_value
+
+    errors = [
+        error_text for error_text in [
+            base_url_error,
+            model_error,
+            key_error,
+            timeout_error,
+            token_error,
+            temperature_error,
+        ] if error_text != ""
+    ]
+    settings["configuration_error"] = (
+        "The AI configuration is invalid. Check the server logs." if errors else ""
+    )
+    settings["configuration_issues"] = errors
     return settings
 
 
 def read_setting_number(file_values, name, default_number):
-    """Read one numeric setting and fall back to the default when it is not valid."""
+    """Read one finite numeric setting and fall back to the default when invalid."""
     raw_value = get_live_setting(file_values, name, str(default_number))
     try:
-        return float(raw_value)
-    except ValueError:
+        number = float(raw_value)
+    except (TypeError, ValueError):
         return float(default_number)
+    if not math.isfinite(number):
+        return float(default_number)
+    return number
 
 
 # Read the configuration immediately so the rest of the file can use it.
@@ -320,7 +491,7 @@ PERCENT_INPUT_COLUMNS = [
     "equipment_usage_rate",
 ]
 
-# Numeric fields used to compare a situation with real historical records.
+# Numeric fields used to compare a situation with configured dataset records.
 SIMILARITY_COLUMNS = [
     "incident_distance_km",
     "ambulance_arrivals_per_hour",
@@ -374,7 +545,7 @@ STATUS_ORDER = {"Stable": 0, "Warning": 1, "High Risk": 2}
 
 
 def get_hospital_label(hospital_id):
-    """Return a simple display name such as Hospital 7 for a real hospital id."""
+    """Return a simple display name such as Hospital 7 for a dataset hospital id."""
     return "Hospital " + str(int(hospital_id))
 
 
@@ -439,30 +610,36 @@ def clean_dataset(data):
     # Drop only exact duplicate rows.
     clean = clean.drop_duplicates()
 
-    # Parse the timestamp and remove rows where the timestamp is not readable.
+    # Parse timestamps and numeric schema values before deciding which target
+    # rows are usable. This prevents invalid target text from reaching sklearn.
     clean["timestamp"] = pd.to_datetime(clean["timestamp"], errors="coerce")
-    clean = clean[clean["timestamp"].notna()]
-
-    # Rows without a target value cannot be used for training or for real history.
-    clean = clean.dropna(subset=OUTPUT_COLUMNS)
-
-    # Make sure the numeric columns really are numeric.
-    numeric_columns = NUMERIC_INPUT_COLUMNS + REGRESSION_TARGETS
+    numeric_columns = NUMERIC_INPUT_COLUMNS + REGRESSION_TARGETS + ["hospital_id"]
     for column_name in numeric_columns:
         clean[column_name] = pd.to_numeric(clean[column_name], errors="coerce")
+    clean[numeric_columns] = clean[numeric_columns].replace([np.inf, -np.inf], np.nan)
 
-    # hospital_id is an identifier, so it is kept as a whole number and as text.
-    clean["hospital_id"] = pd.to_numeric(clean["hospital_id"], errors="coerce")
-    clean = clean[clean["hospital_id"].notna()]
+    # Capacity labels are a closed schema. Unexpected labels are unusable
+    # targets rather than a fourth operational state.
+    clean[CLASSIFICATION_TARGET] = clean[CLASSIFICATION_TARGET].astype("string").str.strip()
+    clean.loc[~clean[CLASSIFICATION_TARGET].isin(STATUS_ORDER.keys()), CLASSIFICATION_TARGET] = pd.NA
+
+    # Rows without a valid timestamp, identifier or target cannot be used for
+    # training or dataset-record comparisons.
+    clean = clean.dropna(subset=["timestamp", "hospital_id"] + OUTPUT_COLUMNS)
+
+    # hospital_id is a positive whole-number identifier; fractional values are
+    # rejected instead of silently being truncated into another hospital.
+    valid_hospital_id = (clean["hospital_id"] >= 1.0) & (clean["hospital_id"] % 1.0 == 0.0)
+    clean = clean[valid_hospital_id]
     clean["hospital_id"] = clean["hospital_id"].astype(int)
     clean["hospital_id_text"] = clean["hospital_id"].astype(str)
 
     # Missing category values are filled with a clear Unknown label.
     for column_name in ["disaster_type", "triage_level", "injury_type"]:
-        clean[column_name] = clean[column_name].astype(str).str.strip()
-        clean[column_name] = clean[column_name].replace(["", "nan", "None"], "Unknown")
+        clean[column_name] = clean[column_name].astype("string").fillna("Unknown").str.strip()
+        clean[column_name] = clean[column_name].replace("", "Unknown").astype(str)
 
-    clean[CLASSIFICATION_TARGET] = clean[CLASSIFICATION_TARGET].astype(str).str.strip()
+    clean[CLASSIFICATION_TARGET] = clean[CLASSIFICATION_TARGET].astype(str)
 
     # A tiny negative distance is a measurement error, so it is clipped to zero.
     clean["incident_distance_km"] = clean["incident_distance_km"].clip(lower=0.0)
@@ -498,7 +675,7 @@ def clean_dataset(data):
 
 
 def build_dataset_overview(clean):
-    """Create the real dataset statistics that the overview section displays."""
+    """Create the dataset statistics that the overview section displays."""
     status_counts = clean[CLASSIFICATION_TARGET].value_counts()
 
     overview = {}
@@ -515,7 +692,7 @@ def build_dataset_overview(clean):
 
 
 def build_category_options(clean):
-    """Collect the real dropdown options directly from the cleaned dataset."""
+    """Collect dropdown options directly from the cleaned dataset."""
     hospital_list = []
     for hospital_id in sorted(clean["hospital_id"].unique().tolist()):
         hospital_list.append({"id": int(hospital_id), "label": get_hospital_label(hospital_id)})
@@ -688,7 +865,7 @@ def train_classification_model(x_train, y_train):
 
 
 # =============================================================================
-# SECTION 9: CALCULATE REAL TEST METRICS
+# SECTION 9: CALCULATE HELD-OUT TEST METRICS
 # This section measures quality on the future test period only.
 # It never reports training scores and never replaces a weak score.
 # =============================================================================
@@ -717,11 +894,16 @@ def calculate_regression_metrics(model, x_test, y_test):
 def calculate_classification_metrics(model, x_test, y_test):
     """Calculate accuracy, macro F1, the confusion matrix and per-class recall."""
     predicted_labels = model.predict(x_test)
-    class_labels = list(model.classes_)
+    class_labels = {str(label) for label in model.classes_}
+    class_labels.update(str(label) for label in pd.Series(y_test).dropna().unique().tolist())
+    class_labels = sorted(
+        class_labels,
+        key=lambda label: (STATUS_ORDER.get(label, len(STATUS_ORDER)), label),
+    )
 
     matrix = confusion_matrix(y_test, predicted_labels, labels=class_labels)
 
-    # Recall for one class is correct predictions divided by real cases of that class.
+    # Recall for one class is correct predictions divided by observed cases of that class.
     per_class_recall = {}
     for row_index in range(len(class_labels)):
         row_total = int(matrix[row_index].sum())
@@ -736,7 +918,7 @@ def calculate_classification_metrics(model, x_test, y_test):
 
     metrics = {}
     metrics["accuracy"] = float(accuracy_score(y_test, predicted_labels))
-    metrics["macro_f1"] = float(f1_score(y_test, predicted_labels, average="macro"))
+    metrics["macro_f1"] = float(f1_score(y_test, predicted_labels, average="macro", zero_division=0))
     metrics["labels"] = [str(label) for label in class_labels]
     metrics["confusion_matrix"] = matrix_rows
     metrics["per_class_recall"] = per_class_recall
@@ -784,7 +966,7 @@ def build_record_from_input(clean_input):
 
 
 def build_record_from_dataset_row(row):
-    """Create the same kind of record from one real row of the cleaned dataset."""
+    """Create the same kind of record from one row of the cleaned dataset."""
     record = {}
     record["hospital_id"] = int(row["hospital_id"])
     record["timestamp"] = row["timestamp"]
@@ -977,18 +1159,18 @@ def calculate_resilience_index(prediction, record):
 
 
 def build_pressure_factors(record):
-    """List up to five real values that are associated with higher pressure."""
+    """List up to five input values that are associated with higher pressure."""
     candidates = []
 
-    # Every factor compares one real input with the real training median.
+    # Every factor compares one input with the training-set median.
     above_median_checks = [
-        ["icu_occupancy_rate", "ICU occupancy is above the historical median", True],
-        ["bed_occupancy_rate", "Bed occupancy is above the historical median", True],
-        ["equipment_usage_rate", "Equipment usage is above the historical median", True],
-        ["ambulance_arrivals_per_hour", "Ambulance arrivals are above the historical median", False],
-        ["patient_arrival_rate", "Patient arrival rate is above the historical median", False],
-        ["mortality_risk_score", "Mortality risk is above the historical median", True],
-        ["avg_treatment_time_min", "Average treatment time is above the historical median", False],
+        ["icu_occupancy_rate", "ICU occupancy is above the training-set median", True],
+        ["bed_occupancy_rate", "Bed occupancy is above the training-set median", True],
+        ["equipment_usage_rate", "Equipment usage is above the training-set median", True],
+        ["ambulance_arrivals_per_hour", "Ambulance arrivals are above the training-set median", False],
+        ["patient_arrival_rate", "Patient arrival rate is above the training-set median", False],
+        ["mortality_risk_score", "Mortality risk is above the training-set median", True],
+        ["avg_treatment_time_min", "Average treatment time is above the training-set median", False],
     ]
 
     for check in above_median_checks:
@@ -1007,11 +1189,11 @@ def build_pressure_factors(record):
 
         if is_percent:
             detail_text = ("Current value " + str(round(current_value * 100.0, 1)) +
-                           "% compared with a historical median of " +
+                           "% compared with a training-set median of " +
                            str(round(median_value * 100.0, 1)) + "%.")
         else:
             detail_text = ("Current value " + str(round(current_value, 2)) +
-                           " compared with a historical median of " +
+                           " compared with a training-set median of " +
                            str(round(median_value, 2)) + ".")
 
         candidates.append({"title": title_text, "detail": detail_text, "strength": strength})
@@ -1025,7 +1207,7 @@ def build_pressure_factors(record):
             candidates.append({
                 "title": "The incident is closer to this hospital than usual",
                 "detail": ("Distance " + str(round(distance_value, 1)) +
-                           " km compared with a historical median of " +
+                           " km compared with a training-set median of " +
                            str(round(distance_median, 1)) + " km."),
                 "strength": strength,
             })
@@ -1037,9 +1219,9 @@ def build_pressure_factors(record):
         strength = (nurse_median - nurse_value) / nurse_median
         if strength > 0.05:
             candidates.append({
-                "title": "Nurse-to-patient ratio is below the historical median",
+                "title": "Nurse-to-patient ratio is below the training-set median",
                 "detail": ("Current ratio " + str(round(nurse_value, 3)) +
-                           " compared with a historical median of " +
+                           " compared with a training-set median of " +
                            str(round(nurse_median, 3)) + "."),
                 "strength": strength,
             })
@@ -1051,9 +1233,9 @@ def build_pressure_factors(record):
         strength = (doctor_median - doctor_value) / doctor_median
         if strength > 0.05:
             candidates.append({
-                "title": "Fewer doctors available than the historical median",
+                "title": "Fewer doctors available than the training-set median",
                 "detail": ("Currently " + str(round(doctor_value, 1)) +
-                           " compared with a historical median of " +
+                           " compared with a training-set median of " +
                            str(round(doctor_median, 1)) + "."),
                 "strength": strength,
             })
@@ -1066,8 +1248,8 @@ def build_pressure_factors(record):
 
     if len(factors) == 0:
         factors.append({
-            "title": "No input value is clearly above the historical median",
-            "detail": "The entered condition looks close to or below the usual historical level for this dataset.",
+            "title": "No input value is clearly above the training-set median",
+            "detail": "The entered condition looks close to or below the training-set medians for this dataset.",
         })
 
     return factors
@@ -1079,13 +1261,13 @@ def get_strength_value(item):
 
 
 # =============================================================================
-# SECTION 12: FIND SIMILAR REAL HISTORICAL CASES
-# This section searches the real CSV rows that look like the current situation.
+# SECTION 12: FIND SIMILAR DATASET RECORDS
+# This section searches CSV rows that look like the current situation.
 # It never creates simulated scenarios and only reports observed outcomes.
 # =============================================================================
 
 def find_similar_cases(record):
-    """Find the nearest real historical rows and summarise their real outcomes."""
+    """Find the nearest dataset rows and summarise their recorded outcomes."""
     same_type = CLEAN_DATA["disaster_type"] == record["disaster_type"]
     same_triage = CLEAN_DATA["triage_level"] == record["triage_level"]
 
@@ -1122,7 +1304,7 @@ def find_similar_cases(record):
         return {
             "count": 0,
             "filter_used": filter_used,
-            "message": "No comparable historical record was found for this combination.",
+            "message": "No comparable dataset record was found for this combination.",
         }
 
     nearest = subset.nsmallest(30, "similarity_distance")
@@ -1148,7 +1330,7 @@ def find_similar_cases(record):
 
 # =============================================================================
 # SECTION 13: CREATE RECOVERY STRATEGIES
-# This section builds rule-based recovery actions from the real prediction result.
+# This section builds rule-based recovery actions from the current prediction result.
 # It gives operational suggestions only and never gives clinical treatment advice.
 # =============================================================================
 
@@ -1192,7 +1374,7 @@ def create_recovery_strategies(cards, capacity_status, resilience, record, coord
         next_two_hours.append("Confirming that the roster covers about " + str(staff_needed) + " staff units may help.")
         next_two_hours.append("Planning for about " + str(patients_expected) + " expected patients is enough at the current status.")
 
-    # Group C is built from the real values that are highest right now.
+    # Group C is built from the current values that are highest right now.
     if float(record["icu_occupancy_rate"]) >= 0.85:
         monitoring_priorities.append("ICU occupancy is at " + str(round(float(record["icu_occupancy_rate"]) * 100.0, 1)) + "%, so it should be reviewed frequently.")
     else:
@@ -1224,7 +1406,7 @@ def create_recovery_strategies(cards, capacity_status, resilience, record, coord
 
 
 def create_decision_recommendations(cards, capacity_status, resilience, similar_cases, record):
-    """Create short decision-support recommendations from the real result values."""
+    """Create short decision-support recommendations from the result values."""
     recommendations = []
 
     risk_percent = cards["overload_risk"]["value"]
@@ -1233,7 +1415,7 @@ def create_decision_recommendations(cards, capacity_status, resilience, similar_
         "title": "Reserve prioritisation",
         "detail": ("The model output places this hospital at a predicted overload risk of " + str(risk_percent) +
                    "% with a capacity status of " + capacity_status +
-                   ". Entering the real emergency reserve in the allocation section will rank it against the other hospitals."),
+                   ". Entering the currently available emergency reserve in the allocation section will rank it against the other hospitals."),
     })
 
     recommendations.append({
@@ -1253,15 +1435,15 @@ def create_decision_recommendations(cards, capacity_status, resilience, similar_
 
     if similar_cases.get("count", 0) > 0:
         recommendations.append({
-            "title": "Comparison with real historical cases",
-            "detail": ("In " + str(similar_cases["count"]) + " similar historical records, " + str(similar_cases["high_risk_percent"]) +
+            "title": "Comparison with similar dataset records",
+            "detail": ("In " + str(similar_cases["count"]) + " similar dataset records, " + str(similar_cases["high_risk_percent"]) +
                        "% ended in a High Risk status and the average observed overload risk was " +
-                       str(similar_cases["avg_overload_risk_percent"]) + "%. This is observed history, not a forecast."),
+                       str(similar_cases["avg_overload_risk_percent"]) + "%. These are recorded dataset outcomes, not a forecast."),
         })
     else:
         recommendations.append({
-            "title": "Comparison with real historical cases",
-            "detail": "No sufficiently similar historical record was found, so the prediction should be treated with extra caution.",
+            "title": "Comparison with similar dataset records",
+            "detail": "No sufficiently similar dataset record was found, so the prediction should be treated with extra caution.",
         })
 
     recommendations.append({
@@ -1272,8 +1454,8 @@ def create_decision_recommendations(cards, capacity_status, resilience, similar_
 
     recommendations.append({
         "title": "Validation requirement",
-        "detail": ("Every recommendation on this page is decision support based on historical dataset records and a two-hour "
-                   "prediction target. Qualified hospital and emergency-management staff must confirm the real bed, ventilator "
+        "detail": ("Every recommendation on this page is decision support based on configured dataset records and a two-hour "
+                   "prediction target. Qualified hospital and emergency-management staff must confirm the current bed, ventilator "
                    "and staffing situation before acting."),
     })
 
@@ -1333,7 +1515,7 @@ def min_max_normalise(values):
 
 
 def build_hospital_scenarios(selected_hospital_id, selected_record):
-    """Collect the latest real record of every hospital and apply the user scenario."""
+    """Collect the latest dataset record for every hospital and apply the user scenario."""
     records = []
     for row_index in range(len(LATEST_RECORDS)):
         row = LATEST_RECORDS.iloc[row_index]
@@ -1616,8 +1798,8 @@ def get_priority_value(item):
 
 
 # =============================================================================
-# SECTION 16: CREATE HISTORICAL RESILIENCE ANALYSIS
-# This section reports real weekly history and simple trend directions.
+# SECTION 16: CREATE DATASET TIME-SERIES ANALYSIS
+# This section reports weekly dataset values and simple trend directions.
 # It does not create any long-term forecast, because the target covers two hours.
 # =============================================================================
 
@@ -1644,7 +1826,7 @@ def calculate_trend(values):
 
 
 def build_history_analysis(hospital_id):
-    """Build the real weekly history and trend summary for one hospital."""
+    """Build the weekly dataset trend summary for one hospital."""
     hospital_rows = CLEAN_DATA[CLEAN_DATA["hospital_id"] == int(hospital_id)].copy()
 
     if len(hospital_rows) == 0:
@@ -1731,7 +1913,7 @@ def build_history_analysis(hospital_id):
     analysis["trend_threshold"] = TREND_SLOPE_THRESHOLD
     analysis["summary"] = summary
     analysis["note"] = ("The dataset contains a validated two-hour prediction target. The sustainability panel therefore "
-                        "reports real historical trends rather than inventing unsupported long-term forecasts.")
+                        "reports weekly dataset trends rather than inventing unsupported long-term forecasts.")
     return analysis
 
 
@@ -1741,26 +1923,57 @@ def build_history_analysis(hospital_id):
 # It rejects impossible values and warns about values outside the training range.
 # =============================================================================
 
-def read_number(payload, field_name):
-    """Read one number from the request and reject empty, text and infinite values."""
+def ensure_json_object(payload, object_name="request body"):
+    """Return a bounded validation message unless payload is a JSON object."""
+    if not isinstance(payload, dict):
+        return "The " + object_name + " must be a JSON object."
+    return ""
+
+
+def read_number(payload, field_name, maximum=None):
+    """Read one number and reject booleans, containers, infinity and extremes."""
+    object_error = ensure_json_object(payload)
+    if object_error != "":
+        return None, object_error
     if field_name not in payload:
         return None, "The field " + field_name + " is missing."
 
     raw_value = payload[field_name]
     if raw_value is None:
         return None, "The field " + field_name + " is empty."
+    if isinstance(raw_value, bool):
+        return None, "The field " + field_name + " must be a number, not a boolean."
     if isinstance(raw_value, str) and raw_value.strip() == "":
         return None, "The field " + field_name + " is empty."
+    if isinstance(raw_value, str) and len(raw_value) > 100:
+        return None, "The field " + field_name + " is too long."
+    if not isinstance(raw_value, (int, float, str)):
+        return None, "The field " + field_name + " must be a number."
 
     try:
         number = float(raw_value)
     except (TypeError, ValueError):
         return None, "The field " + field_name + " must be a number."
 
-    if math.isnan(number) or math.isinf(number):
+    if not math.isfinite(number):
         return None, "The field " + field_name + " must be a normal finite number."
+    if maximum is not None and abs(number) > float(maximum):
+        return None, "The field " + field_name + " is outside the supported range."
 
     return number, ""
+
+
+def read_whole_number(payload, field_name, minimum, maximum):
+    """Read a bounded whole number without silently truncating fractions."""
+    number, error_message = read_number(payload, field_name, maximum=maximum)
+    if error_message != "":
+        return None, error_message
+    if not number.is_integer():
+        return None, "The field " + field_name + " must be a whole number."
+    integer_value = int(number)
+    if integer_value < minimum or integer_value > maximum:
+        return None, "The field " + field_name + " is outside the supported range."
+    return integer_value, ""
 
 
 def validate_snapshot(payload):
@@ -1770,24 +1983,30 @@ def validate_snapshot(payload):
     if not isinstance(payload, dict):
         return None, "The request body must be a JSON object.", warnings
 
-    # The hospital must be one of the real hospitals in the dataset.
-    hospital_value, error_message = read_number(payload, "hospital_id")
+    # The hospital must be one of the identifiers in the configured dataset.
+    hospital_id, error_message = read_whole_number(payload, "hospital_id", 1, 1_000_000_000)
     if error_message != "":
         return None, error_message, warnings
 
-    hospital_id = int(hospital_value)
     known_hospitals = CLEAN_DATA["hospital_id"].unique().tolist()
     if hospital_id not in known_hospitals:
         return None, "Hospital " + str(hospital_id) + " does not exist in the dataset.", warnings
 
     # The timestamp must be readable.
     raw_timestamp = payload.get("timestamp", "")
-    if raw_timestamp is None or str(raw_timestamp).strip() == "":
+    if not isinstance(raw_timestamp, str):
+        return None, "The date and time field must be a text timestamp.", warnings
+    raw_timestamp = raw_timestamp.strip()
+    if raw_timestamp == "":
         return None, "The date and time field is empty.", warnings
+    if len(raw_timestamp) > 64:
+        return None, "The date and time field is too long.", warnings
 
     parsed_timestamp = pd.to_datetime(raw_timestamp, errors="coerce")
-    if pd.isna(parsed_timestamp):
+    if not isinstance(parsed_timestamp, pd.Timestamp) or pd.isna(parsed_timestamp):
         return None, "The date and time value could not be read.", warnings
+    if parsed_timestamp.tzinfo is not None:
+        return None, "The date and time must not include a timezone offset.", warnings
 
     # Category values must exist in the dataset.
     category_checks = [
@@ -1802,16 +2021,25 @@ def validate_snapshot(payload):
         allowed_values = check[1]
         friendly_name = check[2]
 
-        raw_value = str(payload.get(field_name, "")).strip()
+        raw_value = payload.get(field_name, "")
+        if not isinstance(raw_value, str):
+            return None, "Please choose a valid " + friendly_name + ".", warnings
+        raw_value = raw_value.strip()
         if raw_value == "":
             return None, "Please choose a " + friendly_name + ".", warnings
+        if len(raw_value) > 100:
+            return None, "The selected " + friendly_name + " is too long.", warnings
         if raw_value not in allowed_values:
-            return None, "The " + friendly_name + " '" + raw_value + "' is not present in the dataset.", warnings
+            return None, "The selected " + friendly_name + " is not present in the dataset.", warnings
         clean_input[field_name] = raw_value
 
     # Every numeric input is read, checked and stored.
     for field_name in NUMERIC_INPUT_COLUMNS:
-        number, error_message = read_number(payload, field_name)
+        number, error_message = read_number(
+            payload,
+            field_name,
+            maximum=NUMERIC_INPUT_MAXIMUMS[field_name],
+        )
         if error_message != "":
             return None, error_message, warnings
 
@@ -1833,7 +2061,7 @@ def validate_snapshot(payload):
         value = clean_input[field_name]
         if value < observed["min"] or value > observed["max"]:
             warnings.append(FEATURE_LABELS[field_name] +
-                            " is outside the model's historical training range, so uncertainty may be higher.")
+                            " is outside the model's observed training range, so uncertainty may be higher.")
 
     # A timestamp outside the dataset period is also worth a clear warning.
     dataset_start = pd.to_datetime(DATASET_INFO["start_timestamp"])
@@ -1846,6 +2074,9 @@ def validate_snapshot(payload):
 
 def validate_reserve(payload):
     """Validate the three emergency reserve values entered by the user."""
+    if not isinstance(payload, dict):
+        return None, "The reserve must be a JSON object."
+
     reserve = {}
     field_map = {
         "icu_beds": "Emergency ICU beds available",
@@ -1854,23 +2085,29 @@ def validate_reserve(payload):
     }
 
     for field_name in field_map:
-        number, error_message = read_number(payload, field_name)
+        number, error_message = read_whole_number(
+            payload,
+            field_name,
+            0,
+            MAX_RESERVE_UNITS,
+        )
         if error_message != "":
             return None, error_message
-        if number < 0:
-            return None, "The field " + field_map[field_name] + " cannot be negative."
-        reserve[field_name] = int(math.floor(number))
+        reserve[field_name] = number
 
     return reserve, ""
 
 
 def validate_weights(payload):
     """Validate the four objective weights entered by the user."""
+    if not isinstance(payload, dict):
+        return None, "The objective weights must be a JSON object."
+
     weights = {}
     weight_fields = ["patient_safety", "overload_relief", "patient_demand", "incident_proximity"]
 
     for field_name in weight_fields:
-        number, error_message = read_number(payload, field_name)
+        number, error_message = read_number(payload, field_name, maximum=MAX_OBJECTIVE_WEIGHT)
         if error_message != "":
             return None, error_message
         if number < 0:
@@ -1882,7 +2119,7 @@ def validate_weights(payload):
 
 # =============================================================================
 # SECTION 18: DATA-GROUNDED CHAT ASSISTANT
-# This section answers questions with fixed rules and real dataset values only.
+# This section answers questions with fixed rules and configured dataset values only.
 # It is not a language model and it never calls an external AI service.
 # =============================================================================
 
@@ -1956,17 +2193,23 @@ def find_unknown_hospital_number(message_text):
 
 def answer_unknown_hospital(hospital_number):
     """Explain clearly that the requested hospital is not part of the dataset."""
+    hospital_ids = [int(item["id"]) for item in CATEGORY_OPTIONS.get("hospitals", [])]
     details = [
-        "The dataset contains " + str(DATASET_INFO["hospital_count"]) + " hospitals, numbered 1 to " +
-        str(DATASET_INFO["hospital_count"]) + ".",
-        "Try a number inside that range, for example 'predict hospital 1'.",
+        "The dataset contains " + str(DATASET_INFO.get("hospital_count", len(hospital_ids))) +
+        " hospital identifier" + ("" if len(hospital_ids) == 1 else "s") + ".",
     ]
+    if hospital_ids:
+        details.append("Available identifiers: " + ", ".join(str(value) for value in hospital_ids) + ".")
+        details.append("Try an available identifier, for example 'predict hospital " +
+                       str(hospital_ids[0]) + "'.")
+    else:
+        details.append("No hospital identifiers are currently available.")
     answer = "Hospital " + str(hospital_number) + " does not exist in this dataset, so I cannot answer about it."
-    return build_chat_reply(answer, details, "Source: list of real hospital identifiers.", "unknown_hospital")
+    return build_chat_reply(answer, details, "Source: list of configured dataset identifiers.", "unknown_hospital")
 
 
 def predict_latest_for_hospital(hospital_id):
-    """Predict the outputs for the latest real record of one hospital."""
+    """Predict outputs for the latest configured dataset record for one hospital."""
     hospital_rows = CLEAN_DATA[CLEAN_DATA["hospital_id"] == int(hospital_id)]
     latest_row = hospital_rows.sort_values("timestamp").iloc[-1]
 
@@ -2013,7 +2256,7 @@ def answer_about_dataset():
         str(DATASET_INFO["warning_records"]) + " Warning, " + str(DATASET_INFO["high_risk_records"]) + " High Risk.",
         "Most common disaster type: " + DATASET_INFO["most_common_disaster_type"] + ".",
     ]
-    answer = ("The planner reads one CSV file of historical hospital crisis records. "
+    answer = ("The planner reads one CSV file of timestamped hospital-crisis dataset records. "
               "It is a stored dataset, not a live connection to any hospital.")
     return build_chat_reply(answer, details, "Source: dataset overview calculated at startup.", "dataset")
 
@@ -2031,8 +2274,28 @@ def answer_about_model():
                    SPLIT_INFO["test_start"] + " to " + SPLIT_INFO["test_end"] + ", which the model never saw.")
     details.append("The six output columns are never used as inputs, so the scores are not inflated by leakage.")
 
-    answer = ("Every score comes from the future test period only. The regression targets reach an R2 near 0.5, "
-              "which means the model explains about half of the variation. The capacity classifier is stronger.")
+    finite_r2_values = [
+        float(metric["r2"])
+        for metric in REGRESSION_METRICS
+        if math.isfinite(float(metric["r2"]))
+    ]
+    if finite_r2_values:
+        r2_summary = ("Held-out regression R2 values range from " +
+                      str(round(min(finite_r2_values), 3)) + " to " +
+                      str(round(max(finite_r2_values), 3)) + " across " +
+                      str(len(finite_r2_values)) + " target" +
+                      ("" if len(finite_r2_values) == 1 else "s") + ".")
+    else:
+        r2_summary = "No finite held-out regression R2 value is available."
+
+    classifier_summary = (
+        "The held-out capacity classifier reports " +
+        str(round(CLASSIFICATION_METRICS["accuracy"] * 100.0, 1)) +
+        "% accuracy and macro F1 " +
+        str(round(CLASSIFICATION_METRICS["macro_f1"], 3)) + "."
+    )
+    answer = ("Every score comes from the later chronological test period only. " +
+              r2_summary + " " + classifier_summary)
     return build_chat_reply(answer, details, "Source: metrics measured on the chronological test set.", "model_quality")
 
 
@@ -2055,7 +2318,7 @@ def answer_about_overload():
     details = [
         "Overload risk is a value between 0 and 1 in the dataset, shown as a percentage in the interface.",
         "Capacity status comes from a separate classifier, not from a fixed overload threshold.",
-        "The three real statuses in the dataset are Stable, Warning and High Risk.",
+        "The three recorded status labels in the dataset are Stable, Warning and High Risk.",
         "Model confidence is the probability the classifier gives to the status it chose.",
     ]
     answer = ("Overload risk describes how close a hospital is to operational overload. The capacity status is "
@@ -2074,14 +2337,14 @@ def answer_about_allocation():
         "No hospital receives more than its estimated need, and the totals never exceed the reserve you entered.",
     ]
     answer = ("The planner shares only the emergency reserve that you type in. It never invents resources and it "
-              "never claims to know the real stock of any hospital.")
+              "never claims to know the confirmed stock of any hospital.")
     return build_chat_reply(answer, details, "Source: transparent priority-based constrained allocation.", "allocation")
 
 
 def answer_about_limitations():
     """Answer honesty questions about live data, the horizon and medical advice."""
     details = [
-        "The CSV holds historical records. Nothing here is a live hospital feed.",
+        "The configured CSV holds timestamped dataset records. Nothing here is a live hospital feed.",
         "The validated prediction horizon is two hours, so no long-term forecast is offered.",
         "The dataset has no total physical capacity, so an exact shortage cannot be calculated.",
         "Allocations refer only to the emergency reserve you enter.",
@@ -2099,14 +2362,14 @@ def answer_how_to_use():
         "Step 1 - Situation: choose a hospital, load its latest dataset record and adjust the values.",
         "Step 2 - Prediction: read the six result cards, the strategies and the decision points.",
         "Step 3 - Resources: type the reserve you really have, set the weights and build the allocation plan.",
-        "Reference: the Resilience view shows real weekly history and the Model view shows the test scores.",
+        "Reference: the Resilience view shows weekly dataset trends and the Model view shows the test scores.",
     ]
     answer = "Work through the numbered steps in the left sidebar from top to bottom."
     return build_chat_reply(answer, details, "Source: application workflow.", "how_to_use")
 
 
 def answer_about_hospital_record(hospital_id):
-    """Report the latest real dataset record of one hospital."""
+    """Report the latest configured dataset record for one hospital."""
     hospital_rows = CLEAN_DATA[CLEAN_DATA["hospital_id"] == int(hospital_id)]
     latest_row = hospital_rows.sort_values("timestamp").iloc[-1]
     record = build_record_from_dataset_row(latest_row)
@@ -2125,11 +2388,11 @@ def answer_about_hospital_record(hospital_id):
         "Recorded capacity status in the dataset: " + str(latest_row[CLASSIFICATION_TARGET]) + ".",
     ]
     answer = "This is the latest dataset record for " + get_hospital_label(hospital_id) + "."
-    return build_chat_reply(answer, details, "Source: one real row of the CSV file.", "hospital_record")
+    return build_chat_reply(answer, details, "Source: one row of the configured CSV file.", "hospital_record")
 
 
 def answer_about_hospital_prediction(hospital_id):
-    """Predict the outputs for one hospital from its latest real record."""
+    """Predict outputs for one hospital from its latest configured dataset record."""
     record, prediction = predict_latest_for_hospital(hospital_id)
     resilience = calculate_resilience_index(prediction, record)
 
@@ -2145,11 +2408,11 @@ def answer_about_hospital_prediction(hospital_id):
     ]
     answer = ("Prediction for " + get_hospital_label(hospital_id) + ", based on its latest dataset record from " +
               pd.to_datetime(record["timestamp"]).strftime("%Y-%m-%d %H:%M") + ".")
-    return build_chat_reply(answer, details, "Source: the trained models applied to one real record.", "hospital_prediction")
+    return build_chat_reply(answer, details, "Source: the trained models applied to one configured dataset record.", "hospital_prediction")
 
 
 def answer_about_hospital_history(hospital_id):
-    """Report the real weekly trends of one hospital."""
+    """Report weekly dataset trends for one hospital."""
     analysis = build_history_analysis(hospital_id)
 
     details = [
@@ -2162,30 +2425,43 @@ def answer_about_hospital_history(hospital_id):
         str(analysis["summary"]["high_risk_percent"]) + "% of its " + str(analysis["summary"]["record_count"]) +
         " records were High Risk.",
     ]
-    answer = ("Real weekly history for " + get_hospital_label(hospital_id) +
+    answer = ("Weekly dataset trends for " + get_hospital_label(hospital_id) +
               ". These are recorded trends, not a long-term forecast.")
-    return build_chat_reply(answer, details, "Source: weekly averages of real CSV rows.", "hospital_history")
+    return build_chat_reply(answer, details, "Source: weekly averages of configured CSV rows.", "hospital_history")
 
 
 def answer_about_pressure_ranking():
     """Name the hospitals with the highest and the lowest operational pressure."""
     scored_rows = rank_hospitals_by_pressure()
 
+    if not scored_rows:
+        return build_chat_reply(
+            "No hospital records are available to rank.",
+            ["The ranking requires at least one configured dataset record."],
+            "Source: configured dataset hospital records.",
+            "pressure_ranking",
+        )
+
     details = []
-    for position in range(3):
+    top_count = min(3, len(scored_rows))
+    for position in range(top_count):
         row = scored_rows[position]
         details.append(str(position + 1) + ". " + row["hospital_label"] + " - priority score " +
                        str(row["priority_score"]) + ", predicted status " + row["capacity_status"] +
                        ", predicted overload risk " + str(row["overload_risk_percent"]) + "%.")
 
-    lowest_row = scored_rows[len(scored_rows) - 1]
-    details.append("Lowest pressure: " + lowest_row["hospital_label"] + " with a priority score of " +
-                   str(lowest_row["priority_score"]) + " and a predicted status of " + lowest_row["capacity_status"] + ".")
+    if len(scored_rows) > top_count:
+        lowest_row = scored_rows[-1]
+        details.append("Lowest modeled pressure: " + lowest_row["hospital_label"] +
+                       " with a priority score of " + str(lowest_row["priority_score"]) +
+                       " and a predicted status of " + lowest_row["capacity_status"] + ".")
     details.append("This ranking uses the latest dataset record of every hospital and four equal objective weights.")
 
     answer = ("Ranked by the multi-objective operational priority score, " + scored_rows[0]["hospital_label"] +
-              " is currently under the most pressure.")
-    return build_chat_reply(answer, details, "Source: model predictions for all 30 latest dataset records.", "pressure_ranking")
+              " has the highest modeled pressure in this ranking.")
+    source_note = ("Source: model predictions for " + str(len(scored_rows)) + " latest dataset " +
+                   ("record." if len(scored_rows) == 1 else "records."))
+    return build_chat_reply(answer, details, source_note, "pressure_ranking")
 
 
 def answer_about_coordination(hospital_id):
@@ -2216,7 +2492,7 @@ def answer_fallback():
     details = [
         "The dataset: size, period, hospitals and recorded statuses.",
         "Model quality: R2, average error, accuracy, macro F1 and the time split.",
-        "One hospital: try 'latest record for hospital 7' or 'predict hospital 12' or 'history of hospital 5'.",
+        "One hospital: try 'latest record for hospital 7' or 'predict hospital 12' or 'trends for hospital 5'.",
         "Comparisons: 'which hospital is under the most pressure' or 'coordination for hospital 3'.",
         "Meanings: resilience index, overload risk, capacity status, priority score.",
         "Honesty: limitations, the two-hour horizon and why this is not live data.",
@@ -2294,7 +2570,7 @@ def build_chat_answer(raw_message, selected_hospital_id):
 
 # =============================================================================
 # SECTION 19: OPTIONAL LANGUAGE MODEL HELPER
-# This section only rewrites real numbers into clearer sentences.
+# This section only rewrites dataset and model values into clearer sentences.
 # It never invents a value and the application works fully without an API key.
 # =============================================================================
 
@@ -2309,12 +2585,59 @@ GROUNDING_RULES = (
 )
 
 
+def log_internal_event(event_name, error=None, status_code=None):
+    """Write a diagnostic event without secret values, URLs or request content."""
+    safe_event = "".join(
+        character for character in str(event_name)
+        if character.isalnum() or character in ("_", "-")
+    )[:80]
+    message = "SERVER EVENT: " + (safe_event or "internal_error")
+    if status_code is not None:
+        message = message + " status=" + str(int(status_code))
+    if error is not None:
+        message = message + " type=" + type(error).__name__
+    print(message)
+
+
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Prevent redirects so authorization never moves to another origin."""
+
+    def redirect_request(self, request_object, file_pointer, code, message, headers, new_url):
+        return None
+
+
+class AIResponseTooLargeError(ValueError):
+    """Raised when an AI service returns more data than this app accepts."""
+
+
+def read_limited_ai_response(web_response):
+    """Read at most MAX_AI_RESPONSE_BYTES from an external response."""
+    content_length = web_response.headers.get("Content-Length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            # A malformed Content-Length is ignored; the bounded read still protects us.
+            declared_length = None
+        if declared_length is not None and declared_length > MAX_AI_RESPONSE_BYTES:
+            raise AIResponseTooLargeError()
+
+    response_bytes = web_response.read(MAX_AI_RESPONSE_BYTES + 1)
+    if len(response_bytes) > MAX_AI_RESPONSE_BYTES:
+        raise AIResponseTooLargeError()
+    return response_bytes
+
+
 def call_language_model(system_prompt, user_prompt):
     """Send one request to any OpenAI-compatible chat endpoint from the .env file."""
     settings = get_ai_settings()
 
     if not settings["enabled"]:
         return "", "The language model is switched off. Set AI_ENABLED=true in the .env file."
+
+    if settings["configuration_error"] != "":
+        log_internal_event("ai_configuration_invalid")
+        return "", "The language model configuration is invalid. Check the server configuration."
 
     if settings["base_url"] == "":
         return "", "AI_BASE_URL is empty in the .env file."
@@ -2340,36 +2663,45 @@ def call_language_model(system_prompt, user_prompt):
     encoded_body = json.dumps(request_body).encode("utf-8")
     web_request = urllib.request.Request(request_url, data=encoded_body, headers=request_headers, method="POST")
 
+    opener = urllib.request.build_opener(NoRedirectHandler())
+
     try:
-        with urllib.request.urlopen(web_request, timeout=settings["timeout_seconds"]) as web_response:
-            answer_data = json.loads(web_response.read().decode("utf-8"))
+        with opener.open(web_request, timeout=settings["timeout_seconds"]) as web_response:
+            answer_bytes = read_limited_ai_response(web_response)
+            answer_data = json.loads(answer_bytes.decode("utf-8"))
 
         message_text = answer_data["choices"][0]["message"]["content"]
         if message_text is None:
             return "", "The language model returned an empty answer."
 
-        return str(message_text).strip(), ""
+        message_text = str(message_text).strip()
+        if len(message_text) > 50_000:
+            return "", "The language model answer was too large."
+        return message_text, ""
 
     except urllib.error.HTTPError as error:
-        # The status code is useful, but the key must never appear in a message.
-        print("AI HTTP ERROR:", error.code, request_url)
+        log_internal_event("ai_http_error", status_code=error.code)
         return "", "The language model service answered with status " + str(error.code) + "."
 
-    except urllib.error.URLError:
-        print("AI CONNECTION ERROR for base URL:", settings["base_url"])
+    except urllib.error.URLError as error:
+        log_internal_event("ai_connection_error", error=error)
         return "", "The language model service could not be reached. Check AI_BASE_URL in the .env file."
 
-    except (KeyError, IndexError, ValueError):
-        print("AI RESPONSE FORMAT ERROR")
+    except AIResponseTooLargeError as error:
+        log_internal_event("ai_response_too_large", error=error)
+        return "", "The language model answer was too large."
+
+    except (KeyError, IndexError, TypeError, ValueError, UnicodeDecodeError) as error:
+        log_internal_event("ai_response_format_error", error=error)
         return "", "The language model answer could not be read."
 
     except Exception as error:
-        print("AI UNEXPECTED ERROR:", str(error))
+        log_internal_event("ai_unexpected_error", error=error)
         return "", "The language model request failed."
 
 
 def build_context_lines(fact_lines):
-    """Join the real facts into one clearly marked context block."""
+    """Join the grounded facts into one clearly marked context block."""
     context_text = "CONTEXT (the only facts you may use):\n"
     for line in fact_lines:
         context_text = context_text + "- " + str(line) + "\n"
@@ -2382,7 +2714,7 @@ def build_general_facts():
     facts.append("Dataset rows: " + str(DATASET_INFO["row_count"]) + " covering " +
                  str(DATASET_INFO["hospital_count"]) + " hospitals.")
     facts.append("Dataset period: " + DATASET_INFO["start_timestamp"] + " to " + DATASET_INFO["end_timestamp"] + ".")
-    facts.append("The data is historical records from a CSV file, never a live hospital feed.")
+    facts.append("The configured data consists of timestamped CSV records, never a live hospital feed.")
     facts.append("Recorded statuses: " + str(DATASET_INFO["stable_records"]) + " Stable, " +
                  str(DATASET_INFO["warning_records"]) + " Warning, " +
                  str(DATASET_INFO["high_risk_records"]) + " High Risk.")
@@ -2421,7 +2753,7 @@ def improve_chat_answer(question_text, rule_reply):
 
 
 def build_briefing_facts(cards, capacity, resilience, record, pressure_factors, similar_cases, strategies):
-    """Collect the real prediction values that the briefing is allowed to use."""
+    """Collect the prediction values that the briefing is allowed to use."""
     facts = []
     facts.append("Hospital: " + get_hospital_label(record["hospital_id"]) + ".")
     facts.append("Situation time: " + pd.to_datetime(record["timestamp"]).strftime("%Y-%m-%d %H:%M") + ".")
@@ -2448,7 +2780,7 @@ def build_briefing_facts(cards, capacity, resilience, record, pressure_factors, 
         facts.append("Pressure factor: " + factor["title"] + " " + factor["detail"])
 
     if similar_cases.get("count", 0) > 0:
-        facts.append("In " + str(similar_cases["count"]) + " similar historical records, " +
+        facts.append("In " + str(similar_cases["count"]) + " similar dataset records, " +
                      str(similar_cases["high_risk_percent"]) + "% ended High Risk and the average observed overload "
                      "risk was " + str(similar_cases["avg_overload_risk_percent"]) + "%.")
 
@@ -2542,17 +2874,26 @@ def read_briefing_json(answer_text):
                 cleaned_text = stripped
                 break
 
-    start_position = cleaned_text.find("{")
-    end_position = cleaned_text.rfind("}")
-    if start_position < 0 or end_position <= start_position:
-        return "", []
-
     try:
-        parsed = json.loads(cleaned_text[start_position:end_position + 1])
+        parsed = json.loads(cleaned_text)
     except ValueError:
+        # A small amount of surrounding prose is tolerated, but a valid JSON
+        # non-object is never reinterpreted as an object hidden inside it.
+        start_position = cleaned_text.find("{")
+        end_position = cleaned_text.rfind("}")
+        if start_position < 0 or end_position <= start_position:
+            return "", []
+        try:
+            parsed = json.loads(cleaned_text[start_position:end_position + 1])
+        except ValueError:
+            return "", []
+
+    if not isinstance(parsed, dict):
         return "", []
 
     summary_text = str(parsed.get("summary", "")).strip()
+    if len(summary_text) > 2_000:
+        summary_text = summary_text[:2_000].rstrip()
 
     recommendation_list = []
     raw_list = parsed.get("recommendations", [])
@@ -2560,7 +2901,7 @@ def read_briefing_json(answer_text):
         for item in raw_list:
             text_item = str(item).strip()
             if text_item != "":
-                recommendation_list.append(text_item)
+                recommendation_list.append(text_item[:500].rstrip())
 
     return summary_text, recommendation_list[:6]
 
@@ -2618,6 +2959,10 @@ def start_everything():
     if len(missing_columns) > 0:
         raise ValueError("The dataset is missing these required columns: " + ", ".join(missing_columns))
 
+    # Retain only the documented schema so unexpected sensitive columns do not
+    # remain in long-lived global DataFrames.
+    raw_data = raw_data[REQUIRED_COLUMNS].copy()
+
     clean = clean_dataset(raw_data)
     if len(clean) == 0:
         raise ValueError("No usable rows remained after cleaning the dataset.")
@@ -2633,7 +2978,7 @@ def start_everything():
     DATASET_INFO = build_dataset_overview(clean)
     CATEGORY_OPTIONS = build_category_options(clean)
 
-    # The latest real record of every hospital is used by the allocation report.
+    # The latest configured dataset record for every hospital is used by the allocation report.
     LATEST_RECORDS = clean.sort_values("timestamp").groupby("hospital_id").tail(1)
     LATEST_RECORDS = LATEST_RECORDS.sort_values("hospital_id").reset_index(drop=True)
 
@@ -2674,13 +3019,41 @@ def run_startup_self_check():
         print("=" * 70)
     except Exception as error:
         MODEL_READY = False
-        STARTUP_ERROR = str(error)
-        # The full trace stays in the server console only.
-        print("STARTUP FAILED:", STARTUP_ERROR)
-        print(traceback.format_exc())
+        STARTUP_ERROR = PUBLIC_STARTUP_ERROR
+        log_internal_event("startup_failed", error=error)
 
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = MAX_REQUEST_BODY_BYTES
+
+
+@app.after_request
+def add_security_headers(response):
+    """Add browser hardening headers and prevent API response caching."""
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()",
+    )
+    response.headers.setdefault(
+        "Content-Security-Policy",
+        "default-src 'self'; "
+        "script-src 'self'; "
+        "style-src 'self'; img-src 'self' data:; font-src 'self'; "
+        "connect-src 'self'; object-src 'none'; base-uri 'self'; "
+        "frame-ancestors 'none'; form-action 'self'",
+    )
+    if request.is_secure:
+        response.headers.setdefault(
+            "Strict-Transport-Security",
+            "max-age=31536000; includeSubDomains",
+        )
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+    return response
 
 # The whole pipeline runs one single time when the application starts.
 run_startup_self_check()
@@ -2694,10 +3067,10 @@ def home_page():
 
 @app.route("/api/status")
 def api_status():
-    """Return the startup state, the dataset overview and the real test metrics."""
+    """Return the startup state, dataset overview and held-out test metrics."""
     response = {}
     response["ready"] = MODEL_READY
-    response["startup_error"] = STARTUP_ERROR
+    response["startup_error"] = "" if MODEL_READY else PUBLIC_STARTUP_ERROR
     response["methodology_label"] = METHODOLOGY_LABEL
     response["model_names"] = {
         "regression": "RandomForestRegressor with multi-output targets",
@@ -2708,14 +3081,15 @@ def api_status():
     ai_settings = get_ai_settings()
     response["ai"] = {
         "enabled": ai_settings["enabled"],
+        "available": ai_settings["enabled"] and ai_settings["configuration_error"] == "",
         "model": ai_settings["model"] if ai_settings["enabled"] else "",
-        "has_api_key": ai_settings["api_key"] != "",
+        "configuration_valid": ai_settings["configuration_error"] == "",
         "note": ("The language model only rewrites values that the trained models produced. "
-                 "Every number stays from the dataset and the forests."),
+                  "Every number stays from the dataset and the forests."),
     }
 
     if not MODEL_READY:
-        return jsonify(make_json_safe(response)), 200
+        return jsonify(make_json_safe(response)), 503
 
     response["dataset"] = DATASET_INFO
     response["split"] = SPLIT_INFO
@@ -2728,7 +3102,7 @@ def api_status():
 
 @app.route("/api/options")
 def api_options():
-    """Return the real dropdown values and the observed training ranges."""
+    """Return configured dataset options and observed training ranges."""
     if not MODEL_READY:
         return jsonify({"error": "The dataset or the models are not ready. Check the model status message."}), 503
 
@@ -2745,7 +3119,7 @@ def api_options():
 
 @app.route("/api/hospital/<int:hospital_id>/latest")
 def api_hospital_latest(hospital_id):
-    """Return the latest real input record of one hospital in interface units."""
+    """Return the latest configured dataset record for one hospital in interface units."""
     if not MODEL_READY:
         return jsonify({"error": "The dataset or the models are not ready. Check the model status message."}), 503
 
@@ -2763,7 +3137,7 @@ def api_hospital_latest(hospital_id):
 
 @app.route("/api/history/<int:hospital_id>")
 def api_history(hospital_id):
-    """Return the real weekly history and trend directions of one hospital."""
+    """Return weekly dataset values and trend directions for one hospital."""
     if not MODEL_READY:
         return jsonify({"error": "The dataset or the models are not ready. Check the model status message."}), 503
 
@@ -2781,14 +3155,15 @@ def api_predict():
         return jsonify({"error": "The dataset or the models are not ready. Check the model status message."}), 503
 
     payload = request.get_json(silent=True)
-    if payload is None:
-        return jsonify({"error": "The request body must be valid JSON."}), 400
+    if not isinstance(payload, dict):
+        return jsonify({"error": "The request body must be a JSON object."}), 400
 
     # An unknown hospital is a missing resource, so it answers with 404.
-    hospital_value, hospital_error = read_number(payload, "hospital_id")
-    if hospital_error == "":
-        if int(hospital_value) not in CLEAN_DATA["hospital_id"].unique().tolist():
-            return jsonify({"error": "Hospital " + str(int(hospital_value)) + " does not exist in the dataset."}), 404
+    hospital_id, hospital_error = read_whole_number(payload, "hospital_id", 1, 1_000_000_000)
+    if hospital_error != "":
+        return jsonify({"error": hospital_error}), 400
+    if hospital_id not in CLEAN_DATA["hospital_id"].unique().tolist():
+        return jsonify({"error": "The requested hospital does not exist in the dataset."}), 404
 
     clean_input, error_message, warnings = validate_snapshot(payload)
     if error_message != "":
@@ -2806,7 +3181,7 @@ def api_predict():
         pressure_factors = build_pressure_factors(record)
         similar_cases = find_similar_cases(record)
 
-        # Every hospital is predicted as well, so coordination candidates are real.
+        # Every hospital is predicted as well, so coordination candidates are dataset-backed.
         scenario_records = build_hospital_scenarios(record["hospital_id"], record)
         scenario_predictions, ignored_frame = predict_records(scenario_records)
         equal_weights = normalise_weights({
@@ -2845,9 +3220,7 @@ def api_predict():
         return jsonify(make_json_safe(response)), 200
 
     except Exception as error:
-        # Only the server console sees the detailed trace.
-        print("PREDICTION ERROR:", str(error))
-        print(traceback.format_exc())
+        log_internal_event("prediction_failed", error=error)
         return jsonify({"error": "The prediction could not be completed because of an internal server error."}), 500
 
 
@@ -2858,30 +3231,36 @@ def api_allocate():
         return jsonify({"error": "The dataset or the models are not ready. Check the model status message."}), 503
 
     payload = request.get_json(silent=True)
-    if payload is None:
-        return jsonify({"error": "The request body must be valid JSON."}), 400
+    if not isinstance(payload, dict):
+        return jsonify({"error": "The request body must be a JSON object."}), 400
 
-    reserve, error_message = validate_reserve(payload.get("reserve", {}))
+    reserve, error_message = validate_reserve(payload.get("reserve"))
     if error_message != "":
         return jsonify({"error": error_message}), 400
 
-    weights, error_message = validate_weights(payload.get("weights", {}))
+    weights, error_message = validate_weights(payload.get("weights"))
     if error_message != "":
         return jsonify({"error": error_message}), 400
 
-    selected_value, error_message = read_number(payload, "selected_hospital_id")
+    selected_hospital_id, error_message = read_whole_number(
+        payload,
+        "selected_hospital_id",
+        1,
+        1_000_000_000,
+    )
     if error_message != "":
         return jsonify({"error": error_message}), 400
 
-    selected_hospital_id = int(selected_value)
     if selected_hospital_id not in CLEAN_DATA["hospital_id"].unique().tolist():
-        return jsonify({"error": "Hospital " + str(selected_hospital_id) + " does not exist in the dataset."}), 404
+        return jsonify({"error": "The requested hospital does not exist in the dataset."}), 404
 
     selected_record = None
     snapshot_warnings = []
 
     # The user may apply the current form scenario to the selected hospital only.
-    use_scenario = bool(payload.get("use_current_scenario", False))
+    use_scenario = payload.get("use_current_scenario", False)
+    if not isinstance(use_scenario, bool):
+        return jsonify({"error": "The field use_current_scenario must be true or false."}), 400
     if use_scenario:
         snapshot = payload.get("snapshot", None)
         if snapshot is None:
@@ -2918,7 +3297,7 @@ def api_allocate():
                                     "because the dataset does not confirm that both values use the same unit.")
         if reserve["icu_beds"] == 0 and reserve["ventilators"] == 0 and reserve["staff"] == 0:
             methodology_warnings.append("Every reserve value is zero, so the table shows the priority ranking only. "
-                                        "Enter a real available reserve to distribute resources.")
+                                        "Enter the currently available reserve to distribute resources.")
         for warning_text in snapshot_warnings:
             methodology_warnings.append(warning_text)
 
@@ -2954,23 +3333,24 @@ def api_allocate():
         return jsonify(make_json_safe(response)), 200
 
     except Exception as error:
-        # Only the server console sees the detailed trace.
-        print("ALLOCATION ERROR:", str(error))
-        print(traceback.format_exc())
+        log_internal_event("allocation_failed", error=error)
         return jsonify({"error": "The allocation plan could not be completed because of an internal server error."}), 500
 
 
 @app.route("/api/chat", methods=["POST"])
 def api_chat():
-    """Answer one user question with fixed rules and real dataset values."""
+    """Answer one user question with fixed rules and configured dataset values."""
     if not MODEL_READY:
         return jsonify({"error": "The dataset or the models are not ready. Check the model status message."}), 503
 
     payload = request.get_json(silent=True)
-    if payload is None:
-        return jsonify({"error": "The request body must be valid JSON."}), 400
+    if not isinstance(payload, dict):
+        return jsonify({"error": "The request body must be a JSON object."}), 400
 
-    raw_message = str(payload.get("message", "")).strip()
+    raw_message = payload.get("message", "")
+    if not isinstance(raw_message, str):
+        return jsonify({"error": "The question must be text."}), 400
+    raw_message = raw_message.strip()
     if raw_message == "":
         return jsonify({"error": "Please type a question before sending it."}), 400
     if len(raw_message) > 400:
@@ -2979,16 +3359,22 @@ def api_chat():
     # The selected hospital is optional and only used when no number is written.
     selected_hospital_id = None
     if payload.get("selected_hospital_id", None) is not None:
-        hospital_value, hospital_error = read_number(payload, "selected_hospital_id")
-        if hospital_error == "":
-            if int(hospital_value) in CLEAN_DATA["hospital_id"].unique().tolist():
-                selected_hospital_id = int(hospital_value)
+        selected_hospital_id, hospital_error = read_whole_number(
+            payload,
+            "selected_hospital_id",
+            1,
+            1_000_000_000,
+        )
+        if hospital_error != "":
+            return jsonify({"error": hospital_error}), 400
+        if selected_hospital_id not in CLEAN_DATA["hospital_id"].unique().tolist():
+            return jsonify({"error": "The requested hospital does not exist in the dataset."}), 404
 
     try:
         reply = build_chat_answer(raw_message, selected_hospital_id)
         reply["question"] = raw_message
 
-        # The rule-based answer is always kept, so the real numbers stay visible.
+        # The rule-based answer is always kept, so the grounded values stay visible.
         settings = get_ai_settings()
         reply["ai_enabled"] = settings["enabled"]
         reply["ai_used"] = False
@@ -3008,27 +3394,26 @@ def api_chat():
         return jsonify(make_json_safe(reply)), 200
 
     except Exception as error:
-        # Only the server console sees the detailed trace.
-        print("CHAT ERROR:", str(error))
-        print(traceback.format_exc())
+        log_internal_event("chat_failed", error=error)
         return jsonify({"error": "The assistant could not answer because of an internal server error."}), 500
 
 
 @app.route("/api/briefing", methods=["POST"])
 def api_briefing():
-    """Write a short situation briefing from freshly recalculated real predictions."""
+    """Write a short situation briefing from freshly recalculated predictions."""
     if not MODEL_READY:
         return jsonify({"error": "The dataset or the models are not ready. Check the model status message."}), 503
 
     payload = request.get_json(silent=True)
-    if payload is None:
-        return jsonify({"error": "The request body must be valid JSON."}), 400
+    if not isinstance(payload, dict):
+        return jsonify({"error": "The request body must be a JSON object."}), 400
 
     # An unknown hospital is a missing resource, so it answers with 404.
-    hospital_value, hospital_error = read_number(payload, "hospital_id")
-    if hospital_error == "":
-        if int(hospital_value) not in CLEAN_DATA["hospital_id"].unique().tolist():
-            return jsonify({"error": "Hospital " + str(int(hospital_value)) + " does not exist in the dataset."}), 404
+    hospital_id, hospital_error = read_whole_number(payload, "hospital_id", 1, 1_000_000_000)
+    if hospital_error != "":
+        return jsonify({"error": hospital_error}), 400
+    if hospital_id not in CLEAN_DATA["hospital_id"].unique().tolist():
+        return jsonify({"error": "The requested hospital does not exist in the dataset."}), 404
 
     clean_input, error_message, warnings = validate_snapshot(payload)
     if error_message != "":
@@ -3062,9 +3447,7 @@ def api_briefing():
         return jsonify(make_json_safe(briefing)), 200
 
     except Exception as error:
-        # Only the server console sees the detailed trace.
-        print("BRIEFING ERROR:", str(error))
-        print(traceback.format_exc())
+        log_internal_event("briefing_failed", error=error)
         return jsonify({"error": "The briefing could not be created because of an internal server error."}), 500
 
 
@@ -3079,7 +3462,14 @@ def handle_not_found(error):
 @app.errorhandler(500)
 def handle_server_error(error):
     """Return a short JSON message instead of an exception trace."""
+    log_internal_event("unhandled_request_error", error=error)
     return jsonify({"error": "An unexpected server error happened."}), 500
+
+
+@app.errorhandler(413)
+def handle_request_too_large(error):
+    """Return a bounded JSON response when a request exceeds the body limit."""
+    return jsonify({"error": "The request body is too large."}), 413
 
 
 # =============================================================================
@@ -3090,10 +3480,11 @@ def handle_server_error(error):
 
 if __name__ == "__main__":
     server_port = get_port_number()
-    debug_mode = get_debug_flag()
+    server_host = get_host_address()
+    debug_mode = get_safe_debug_flag(server_host)
 
-    print("Starting the CityCare Recovery Planner on port", server_port)
+    print("Starting the CityCare Recovery Planner on", server_host, "port", server_port)
     print("Debug mode:", debug_mode)
 
     # The reloader is switched off so the models are never trained twice.
-    app.run(host="0.0.0.0", port=server_port, debug=debug_mode, use_reloader=False)
+    app.run(host=server_host, port=server_port, debug=debug_mode, use_reloader=False)
