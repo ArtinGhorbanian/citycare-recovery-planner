@@ -1,227 +1,106 @@
-# Design System Master File
+# CityCare Recovery Planner design system
 
-> **LOGIC:** When building a specific page, first check `design-system/pages/[page-name].md`.
-> If that file exists, its rules **override** this Master file.
-> If not, strictly follow the rules below.
+**Status:** implemented release system
 
----
+**Updated:** 2026-08-08
 
-**Project:** CityCare Recovery Planner
-**Generated:** 2026-08-08 13:42:13
-**Category:** Analytics Dashboard
-**Design Dials:** Variance 4/10 (Balanced / Modern) | Motion 3/10 (Subtle) | Density 8/10 (Dense / Dashboard)
+**Product type:** data-dense operational decision-support dashboard
+**Design dials:** moderate visual variance, subtle motion, high information density
 
----
+## Product principles
 
-## Global Rules
+1. Keep hospital, scenario time, data basis, and result freshness visible across workflows.
+2. Treat loading, draft, current, stale, locked, degraded, and error conditions as first-class states.
+3. Pair every chart with accessible data and preserve the workflow when chart rendering fails.
+4. Use calm, restrained visual hierarchy; color communicates state but never carries meaning alone.
+5. Keep clinical and operational claims conservative: this is a prototype, not a live or medical system.
+6. Prefer local assets and system fonts so the core interface has no third-party browser requests.
 
-### Color Palette
+## Implemented palette
 
-| Role | Hex | CSS Variable |
-|------|-----|--------------|
-| Primary | `#1E40AF` | `--color-primary` |
-| On Primary | `#FFFFFF` | `--color-on-primary` |
-| Secondary | `#3B82F6` | `--color-secondary` |
-| Accent/CTA | `#D97706` | `--color-accent` |
-| Background | `#F8FAFC` | `--color-background` |
-| Foreground | `#1E3A8A` | `--color-foreground` |
-| Muted | `#E9EEF6` | `--color-muted` |
-| Border | `#DBEAFE` | `--color-border` |
-| Destructive | `#DC2626` | `--color-destructive` |
-| Ring | `#1E40AF` | `--color-ring` |
+The canonical tokens live in `static/style.css`.
 
-**Color Notes:** Blue data + amber highlights [Accent adjusted from #F59E0B for WCAG 3:1]
+| Role | Token | Value |
+| --- | --- | --- |
+| Primary navigation | `--navy-900` | `#0b2238` |
+| Primary action | `--teal-600` | `#0f7f8c` |
+| Dark teal text/action | `--teal-700` | `#0b6b76` |
+| Light teal surface | `--teal-100` | `#e2f5f7` |
+| Positive state | `--green-600` | `#1c7a4b` |
+| Caution state | `--amber-600` | `#835000` |
+| Critical state | `--red-600` | `#b1281f` |
+| Strong text | `--text-strong` | `#0f1f2e` |
+| Body text | `--text-body` | `#35485c` |
+| Muted text | `--text-muted` | `#52687c` |
+| App background | `--background` | `#f3f6fa` |
+| Surface | `--surface` | `#ffffff` |
 
-### Typography
+All normal-size text targets at least WCAG AA contrast. The small uppercase `.view-step` label uses `--teal-700` against the app background.
 
-- **Heading Font:** Fira Code
-- **Body Font:** Fira Sans
-- **Mood:** dashboard, data, analytics, code, technical, precise
-- **Google Fonts:** [Fira Code + Fira Sans](https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap)
+## Typography
 
-**CSS Import:**
-```css
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
-```
+- Font stack: system UI (`-apple-system`, BlinkMacSystemFont, `Segoe UI`, sans-serif).
+- No remote font import.
+- Body size: 16 px on narrow screens to prevent mobile form zoom.
+- Headings use a compact 1.25 line height; body copy uses 1.6.
+- Labels and status metadata may use uppercase and tracking only at accessible sizes and contrast.
 
-### Spacing Variables
+## Layout
 
-*Density: 8/10 — Dense / Dashboard*
+- Desktop: fixed 272 px navigation rail plus a fluid content canvas.
+- Content: constrained, centered dashboard sections with dense cards and tables.
+- Scenario strip: persistent summary of hospital, time, basis, and freshness.
+- Mobile: off-canvas navigation, single-column fields/cards, safe-area padding, and no horizontal page overflow.
+- Touch targets: at least 44 px for interactive controls on narrow screens.
 
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--space-xs` | `2px` / `0.125rem` | Tight gaps |
-| `--space-sm` | `4px` / `0.25rem` | Icon gaps, inline spacing |
-| `--space-md` | `8px` / `0.5rem` | Standard padding |
-| `--space-lg` | `12px` / `0.75rem` | Section padding |
-| `--space-xl` | `16px` / `1rem` | Large gaps |
-| `--space-2xl` | `24px` / `1.5rem` | Section margins |
-| `--space-3xl` | `32px` / `2rem` | Hero padding |
+## Components and states
 
-### Shadow Depths
+### Navigation
 
-| Level | Value | Usage |
-|-------|-------|-------|
-| `--shadow-sm` | `0 1px 2px rgba(0,0,0,0.05)` | Subtle lift |
-| `--shadow-md` | `0 4px 6px rgba(0,0,0,0.1)` | Cards, buttons |
-| `--shadow-lg` | `0 10px 15px rgba(0,0,0,0.1)` | Modals, dropdowns |
-| `--shadow-xl` | `0 20px 25px rgba(0,0,0,0.15)` | Hero images, featured cards |
+- Each workflow item includes a title, short purpose, SVG icon, and optional state text.
+- Result sections expose `Locked`, `Ready`, or `Stale` in text as well as color.
+- Mobile drawer moves focus to Close, traps focus, closes on Escape, marks background content inert, and restores focus to the opener.
 
----
+### Forms
 
-## Component Specs
+- Labels are explicit and helper text explains units.
+- Inline errors use `aria-invalid`, field-level messages, and a summary that focuses the first invalid control.
+- Required hospital prefills lock the whole scenario fieldset; manual latest-load requests can be canceled safely by a newer edit.
 
-### Buttons
+### Results
 
-```css
-/* Primary Button */
-.btn-primary {
-  background: #D97706;
-  color: white;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
+- Provenance panels show hospital, scenario time, received time, and data basis.
+- Any upstream edit invalidates dependent prediction/allocation output and disables stale downloads.
+- Capacity and risk states combine plain language, numbers, and restrained semantic color.
 
-.btn-primary:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
+### Charts and tables
 
-/* Secondary Button */
-.btn-secondary {
-  background: transparent;
-  color: #1E40AF;
-  border: 2px solid #1E40AF;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-```
-
-### Cards
-
-```css
-.card {
-  background: #F8FAFC;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: var(--shadow-md);
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.card:hover {
-  box-shadow: var(--shadow-lg);
-  transform: translateY(-2px);
-}
-```
-
-### Inputs
-
-```css
-.input {
-  padding: 12px 16px;
-  border: 1px solid #E2E8F0;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: border-color 200ms ease;
-}
-
-.input:focus {
-  border-color: #1E40AF;
-  outline: none;
-  box-shadow: 0 0 0 3px #1E40AF20;
-}
-```
-
-### Modals
-
-```css
-.modal-overlay {
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-}
-
-.modal {
-  background: white;
-  border-radius: 16px;
-  padding: 32px;
-  box-shadow: var(--shadow-xl);
-  max-width: 500px;
-  width: 90%;
-}
-```
-
----
-
-## Style Guidelines
-
-**Style:** Data-Dense Dashboard
-
-**Keywords:** Multiple charts/widgets, data tables, KPI cards, minimal padding, grid layout, space-efficient, maximum data visibility
-
-**Best For:** Business intelligence dashboards, financial analytics, enterprise reporting, operational dashboards, data warehousing
-
-**Key Effects:** Hover tooltips, chart zoom on click, row highlighting on hover, smooth filter animations, data loading spinners
-
-### Page Pattern
-
-**Pattern Name:** Real-Time / Operations Landing
-
-- **Conversion Strategy:** For ops/security/iot products. Demo or sandbox link. Trust signals.
-- **CTA Placement:** Primary CTA in nav + After metrics
-- **Section Order:** 1. Hero (product + live preview or status), 2. Key metrics/indicators, 3. How it works, 4. CTA (Start trial / Contact)
-
----
+- Chart.js 4.4.1 is self-hosted and loaded as a nonblocking enhancement.
+- Canvas elements have useful accessible names.
+- Equivalent table data is available through disclosure controls.
+- When the library is missing or rendering fails, the table remains usable and a plain-language notice appears.
 
 ## Motion
 
-**Scroll Reveal** (Subtle) — Trigger: scroll (viewport enter) | Duration: 300-400ms | Easing: `power1.out`
+- Motion is limited to short hover, focus, drawer, and scrolling transitions.
+- `prefers-reduced-motion: reduce` disables smooth scrolling, chart animation, and nonessential transitions.
+- No scroll-reveal library, parallax, autoplay, or attention-seeking animation is used.
 
-```js
-gsap.from(el, { opacity: 0, y: 12, duration: 0.35, ease: 'power1.out', scrollTrigger: { trigger: el, start: 'top 90%', toggleActions: 'play none none reverse' } });
-```
+## Content rules
 
-**Framework notes:** Requires the ScrollTrigger plugin registered once via gsap.registerPlugin(ScrollTrigger)
+- Say “configured dataset,” “dataset records,” or “training/test set”; do not claim unverified real-world provenance.
+- Label the repository demo data as synthetic and non-representative.
+- Never present model estimates as verified resources, causal explanations, clinical decisions, or guaranteed outcomes.
+- State AI mode accurately: fixed-rule is the default; invalid or unavailable AI configuration is a degraded fixed-rule state.
+- Keep the competition reference descriptive and make no endorsement, award, or ownership claim.
 
-- ✅ Keep the y offset small (8-16px) so it reads as a fade, not a slide
-- ❌ Don't reveal below-the-fold content needed for SEO/crawlers as invisible-by-default without a no-JS fallback
-- ⚡ toggleActions 'play none none reverse' avoids re-triggering on every scroll direction change
+## Release checklist
 
----
-
-## Anti-Patterns (Do NOT Use)
-
-- ❌ Ornate design
-- ❌ No filtering
-
-### Additional Forbidden Patterns
-
-- ❌ **Emojis as icons** — Use SVG icons (Heroicons, Lucide, Simple Icons)
-- ❌ **Missing cursor:pointer** — All clickable elements must have cursor:pointer
-- ❌ **Layout-shifting hovers** — Avoid scale transforms that shift layout
-- ❌ **Low contrast text** — Maintain 4.5:1 minimum contrast ratio
-- ❌ **Instant state changes** — Always use transitions (150-300ms)
-- ❌ **Invisible focus states** — Focus states must be visible for a11y
-
----
-
-## Pre-Delivery Checklist
-
-Before delivering any UI code, verify:
-
-- [ ] No emojis used as icons (use SVG instead)
-- [ ] All icons from consistent icon set (Heroicons/Lucide)
-- [ ] `cursor-pointer` on all clickable elements
-- [ ] Hover states with smooth transitions (150-300ms)
-- [ ] Light mode: text contrast 4.5:1 minimum
-- [ ] Focus states visible for keyboard navigation
-- [ ] `prefers-reduced-motion` respected
-- [ ] Responsive: 375px, 768px, 1024px, 1440px
-- [ ] No content hidden behind fixed navbars
-- [ ] No horizontal scroll on mobile
+- Keyboard-only navigation and visible focus verified.
+- Drawer focus trap, Escape close, background inertness, and focus restoration verified.
+- 375 px mobile layout has no page-level horizontal overflow.
+- Form inputs remain at least 16 px on mobile and controls meet the 44 px target.
+- Stale result and download invalidation verified.
+- Reduced-motion behavior present.
+- Charts have table equivalents and graceful failure behavior.
+- Lighthouse/axe contrast findings reviewed; local favicon prevents avoidable console errors.

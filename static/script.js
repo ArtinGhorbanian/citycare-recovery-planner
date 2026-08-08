@@ -1,10 +1,11 @@
 // ============================================================================
 // SECTION 1: APPLICATION STATE AND DOM ELEMENTS
-// Keeps the latest real API results and short links to the page elements.
+// Keeps the latest API results and short links to the page elements.
 // ============================================================================
 
 var appState = {
     ready: false,
+    backendReady: false,
     options: null,
     status: null,
     predictionResult: null,
@@ -13,8 +14,32 @@ var appState = {
     currentView: "overview",
     hasPrediction: false,
     hasAllocation: false,
+    predictionStale: false,
+    allocationStale: false,
     showAllAllocationRows: false,
     aiInfo: null,
+    scenarioRevision: 0,
+    scenarioBasis: "Loading the latest dataset record",
+    predictionGeneration: 0,
+    lastPredictionSnapshot: null,
+    chatStarted: false,
+    drawerReturnFocus: null,
+    latestRequestKind: null,
+    pending: {
+        latest: false,
+        prediction: false,
+        allocation: false,
+        chat: false
+    },
+    requestCounters: {
+        latest: 0,
+        history: 0,
+        prediction: 0,
+        briefing: 0,
+        allocation: 0,
+        chat: 0
+    },
+    requestControllers: {},
     charts: {
         resource: null,
         historyRisk: null,
@@ -55,7 +80,7 @@ var crisisFields = {
 // Write plain text into an element without using innerHTML.
 function setText(elementId, textValue) {
     var target = element(elementId);
-    if (target) {
+    if (target && target.textContent !== String(textValue)) {
         target.textContent = textValue;
     }
 }
@@ -130,7 +155,7 @@ function createFactorItem(titleText, detailText) {
     return listItem;
 }
 
-// Fill one select element with real option values from the dataset.
+// Fill one select element with option values from the configured dataset.
 function fillSelect(selectId, valueList) {
     var target = element(selectId);
     if (!target) {
@@ -148,7 +173,290 @@ function fillSelect(selectId, valueList) {
 
 // Move the reading position back to the top of the freshly opened view.
 function scrollViewToTop() {
-    window.scrollTo({ top: 0, behavior: "smooth" });
+    var reduceMotion = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    window.scrollTo({ top: 0, behavior: reduceMotion ? "auto" : "smooth" });
+}
+
+// Return the human-readable label of the hospital selected in Step 1.
+function selectedHospitalLabel() {
+    var select = element(crisisFields.hospital);
+    if (!select || select.selectedIndex < 0) {
+        return "No hospital selected";
+    }
+    return select.options[select.selectedIndex].textContent || "No hospital selected";
+}
+
+function displayScenarioTimestamp(timestampValue) {
+    if (!timestampValue) {
+        return "Not set";
+    }
+    var timezoneName = "local time";
+    try {
+        timezoneName = Intl.DateTimeFormat().resolvedOptions().timeZone || timezoneName;
+    } catch (error) {
+        // Older browsers still receive an explicit local-time label.
+    }
+    return String(timestampValue).replace("T", " ") + " · " + timezoneName;
+}
+
+// Start one request in a named channel. A newer request aborts and supersedes it.
+function beginRequest(channelName) {
+    var previousController = appState.requestControllers[channelName];
+    if (previousController) {
+        previousController.abort();
+    }
+
+    appState.requestCounters[channelName] += 1;
+    var controller = typeof AbortController === "function" ? new AbortController() : null;
+    appState.requestControllers[channelName] = controller;
+
+    return {
+        id: appState.requestCounters[channelName],
+        signal: controller ? controller.signal : null
+    };
+}
+
+function cancelRequest(channelName) {
+    var controller = appState.requestControllers[channelName];
+    if (controller) {
+        controller.abort();
+    }
+    appState.requestControllers[channelName] = null;
+    appState.requestCounters[channelName] += 1;
+}
+
+function requestIsCurrent(channelName, requestTicket) {
+    return requestTicket && appState.requestCounters[channelName] === requestTicket.id;
+}
+
+function finishRequest(channelName, requestTicket) {
+    if (requestIsCurrent(channelName, requestTicket)) {
+        appState.requestControllers[channelName] = null;
+        return true;
+    }
+    return false;
+}
+
+function isAbortError(error) {
+    return Boolean(error && error.name === "AbortError");
+}
+
+function setAppStatus(sourceName, toneName, titleText, messages) {
+    var banner = element("appStatusBanner");
+    if (!banner) {
+        return;
+    }
+    banner.dataset.source = sourceName;
+    banner.className = "message-box message-" + toneName;
+    banner.setAttribute("role", toneName === "error" ? "alert" : "status");
+    showListMessage("appStatusBanner", titleText, messages);
+}
+
+function clearAppStatus(sourceName) {
+    var banner = element("appStatusBanner");
+    if (banner && (!sourceName || banner.dataset.source === sourceName)) {
+        setVisible("appStatusBanner", false);
+        banner.removeAttribute("data-source");
+    }
+}
+
+function refreshWorkflowControls() {
+    var ready = appState.ready === true;
+    var latestLocksScenario = appState.pending.latest && appState.latestRequestKind !== "manual";
+    var controlRules = [
+        ["analyzeButton", !ready || appState.pending.prediction || appState.pending.latest],
+        ["loadLatestButton", !ready || appState.pending.latest],
+        ["buildAllocationButton", !ready || appState.pending.allocation || appState.pending.latest],
+        ["chatSendButton", !ready || appState.pending.chat]
+    ];
+
+    for (var index = 0; index < controlRules.length; index++) {
+        var control = element(controlRules[index][0]);
+        if (control) {
+            control.disabled = controlRules[index][1];
+        }
+    }
+
+    var hospitalSelect = element(crisisFields.hospital);
+    if (hospitalSelect) {
+        hospitalSelect.disabled = !ready;
+    }
+
+    var crisisForm = element("crisisForm");
+    if (crisisForm) {
+        var crisisFieldsets = crisisForm.querySelectorAll("fieldset");
+        for (var fieldsetIndex = 0; fieldsetIndex < crisisFieldsets.length; fieldsetIndex++) {
+            crisisFieldsets[fieldsetIndex].disabled = !ready || latestLocksScenario;
+        }
+    }
+
+    var chatInput = element("chatInput");
+    if (chatInput) {
+        chatInput.disabled = !ready || appState.pending.chat;
+    }
+
+    var downloadButton = element("downloadAllocationButton");
+    if (downloadButton) {
+        downloadButton.disabled = !ready || !appState.hasAllocation || appState.allocationStale;
+    }
+
+    var chatChips = document.querySelectorAll(".chat-chip");
+    for (var chipIndex = 0; chipIndex < chatChips.length; chipIndex++) {
+        chatChips[chipIndex].disabled = !ready || appState.pending.chat;
+    }
+
+    var chatLog = element("chatLog");
+    if (chatLog) {
+        chatLog.setAttribute("aria-busy", appState.pending.chat ? "true" : "false");
+    }
+}
+
+function updateScenarioStrip() {
+    var strip = element("scenarioStrip");
+    if (!strip || !appState.options) {
+        return;
+    }
+
+    setVisible("scenarioStrip", true);
+    setText("scenarioHospital", selectedHospitalLabel());
+    setText("scenarioTimestamp", displayScenarioTimestamp(element(crisisFields.timestamp).value));
+    setText("scenarioBasis", appState.scenarioBasis);
+
+    var state = element("scenarioState");
+    if (!state) {
+        return;
+    }
+    if (appState.hasPrediction && appState.predictionStale) {
+        state.textContent = "Prediction stale · analyze again";
+        state.className = "scenario-state is-stale";
+    } else if (appState.hasPrediction) {
+        state.textContent = "Prediction current";
+        state.className = "scenario-state is-current";
+    } else {
+        state.textContent = "Draft · not analyzed";
+        state.className = "scenario-state is-draft";
+    }
+}
+
+function invalidatePrediction(reasonText) {
+    cancelRequest("prediction");
+    cancelRequest("briefing");
+    if (appState.pending.prediction) {
+        appState.pending.prediction = false;
+        setButtonLoading("analyzeButton", false, "Analyze Crisis and Build Recovery Plan");
+    }
+
+    if (appState.hasPrediction) {
+        appState.predictionStale = true;
+        setText("predictionStaleText", reasonText || "The scenario changed after this result was calculated.");
+        setVisible("predictionStaleNotice", true);
+    }
+    updateNavigationState();
+    updateScenarioStrip();
+    refreshWorkflowControls();
+}
+
+function invalidateAllocation(reasonText) {
+    cancelRequest("allocation");
+    if (appState.pending.allocation) {
+        appState.pending.allocation = false;
+        setButtonLoading("buildAllocationButton", false, "Build Allocation Plan");
+    }
+
+    if (appState.hasAllocation) {
+        appState.allocationStale = true;
+        setText("allocationStaleText", reasonText ||
+            "The reserve, priorities or selected scenario changed after this report was built.");
+        setVisible("allocationStaleNotice", true);
+    }
+    updateNavigationState();
+    refreshWorkflowControls();
+}
+
+function markScenarioEdited(reasonText) {
+    appState.scenarioRevision += 1;
+    appState.scenarioBasis = "Edited current scenario";
+    invalidatePrediction(reasonText || "A Step 1 value changed after this result was calculated.");
+    if (element("useCurrentScenario").checked) {
+        invalidateAllocation("The current Step 1 scenario changed after this report was built.");
+    }
+    updateScenarioStrip();
+}
+
+function cancelPendingLatestRecordForManualEdit() {
+    if (!appState.pending.latest || appState.latestRequestKind !== "manual") {
+        return;
+    }
+    cancelRequest("latest");
+    appState.pending.latest = false;
+    appState.latestRequestKind = null;
+    setButtonLoading("loadLatestButton", false, "Load Latest Dataset Record");
+    refreshWorkflowControls();
+}
+
+function clearFieldError(field) {
+    if (!field) {
+        return;
+    }
+    field.removeAttribute("aria-invalid");
+    var errorId = field.dataset.validationErrorId;
+    if (errorId) {
+        var errorNode = element(errorId);
+        if (errorNode && errorNode.parentNode) {
+            errorNode.parentNode.removeChild(errorNode);
+        }
+        var describedBy = (field.getAttribute("aria-describedby") || "").split(/\s+/).filter(function (value) {
+            return value && value !== errorId;
+        });
+        if (describedBy.length > 0) {
+            field.setAttribute("aria-describedby", describedBy.join(" "));
+        } else {
+            field.removeAttribute("aria-describedby");
+        }
+        delete field.dataset.validationErrorId;
+    }
+}
+
+function clearValidationErrors(formId) {
+    var form = element(formId);
+    if (!form) {
+        return;
+    }
+    var invalidFields = form.querySelectorAll("[aria-invalid='true']");
+    for (var index = 0; index < invalidFields.length; index++) {
+        clearFieldError(invalidFields[index]);
+    }
+}
+
+function addValidationError(fieldId, messageText, errors) {
+    errors.push(messageText);
+    var field = element(fieldId);
+    if (!field) {
+        return;
+    }
+    clearFieldError(field);
+    var errorId = fieldId + "-error";
+    var error = document.createElement("small");
+    error.className = "field-error";
+    error.id = errorId;
+    error.textContent = messageText;
+    var fieldContainer = field.closest ? field.closest(".field") : field.parentNode;
+    if (fieldContainer) {
+        fieldContainer.appendChild(error);
+    }
+    field.setAttribute("aria-invalid", "true");
+    var describedBy = (field.getAttribute("aria-describedby") || "").split(/\s+/).filter(Boolean);
+    describedBy.push(errorId);
+    field.setAttribute("aria-describedby", describedBy.join(" "));
+    field.dataset.validationErrorId = errorId;
+}
+
+function focusFirstInvalid(formId) {
+    var form = element(formId);
+    var invalidField = form ? form.querySelector("[aria-invalid='true']") : null;
+    if (invalidField) {
+        invalidField.focus();
+    }
 }
 
 
@@ -157,10 +465,13 @@ function scrollViewToTop() {
 // One small function that talks to the Flask API and reports clear errors.
 // ============================================================================
 
-function requestApi(path, method, bodyObject) {
+function requestApi(path, method, bodyObject, abortSignal) {
     var settings = { method: method, headers: { "Content-Type": "application/json" } };
     if (bodyObject) {
         settings.body = JSON.stringify(bodyObject);
+    }
+    if (abortSignal) {
+        settings.signal = abortSignal;
     }
 
     return fetch(path, settings).then(function (response) {
@@ -188,9 +499,9 @@ function requestApi(path, method, bodyObject) {
 function loadStatus() {
     return requestApi("/api/status", "GET", null).then(function (status) {
         appState.status = status;
-        appState.ready = status.ready === true;
+        appState.backendReady = status.ready === true;
 
-        if (!appState.ready) {
+        if (!appState.backendReady) {
             var message = "The dataset or the models could not be prepared.";
             if (status.startup_error) {
                 message = message + " Details: " + status.startup_error;
@@ -199,7 +510,6 @@ function loadStatus() {
             return status;
         }
 
-        setVisible("appStatusBanner", false);
         showDatasetOverview(status.dataset);
         showModelQuality(status);
         showAiStatus(status.ai);
@@ -213,19 +523,32 @@ function showAiStatus(aiInfo) {
 
     if (!aiInfo) {
         setText("aiStatusText", "The language model helper is not configured.");
-        setText("assistantModeNote", "Rule-based mode: answers are written from fixed rules and real dataset values.");
+        setText("assistantModeNote", "Rule-based mode: answers are written from fixed rules and configured dataset values.");
         return;
     }
 
-    if (aiInfo.enabled) {
+    if (aiAssistedModeAvailable(aiInfo)) {
         setText("aiStatusText", "Switched on, using the model " + aiInfo.model + ". " + aiInfo.note);
         setText("assistantModeNote", "Assisted mode: " + aiInfo.model +
             " rewords the answers, and the exact values stay listed under each one.");
+    } else if (aiInfo.enabled === true) {
+        var fallbackReason = aiInfo.configuration_valid ?
+            "the language-model service is currently unavailable" :
+            "the language-model configuration is incomplete or invalid";
+        setText("aiStatusText", "Language-model assistance is switched on, but " + fallbackReason +
+            ". The planner is safely using fixed rules instead.");
+        setText("assistantModeNote", "Fixed-rule fallback: language-model assistance is enabled but unavailable. " +
+            "Answers still use the configured dataset and model values.");
     } else {
-        setText("aiStatusText", "Switched off. Every answer and briefing is written by fixed rules from the real values. " +
+        setText("aiStatusText", "Switched off. Every answer and briefing is written by fixed rules from the configured dataset and model values. " +
             "Set AI_ENABLED=true in the .env file to switch it on.");
-        setText("assistantModeNote", "Rule-based mode: answers are written from fixed rules and real dataset values.");
+        setText("assistantModeNote", "Rule-based mode: answers are written from fixed rules and configured dataset values.");
     }
+}
+
+function aiAssistedModeAvailable(aiInfo) {
+    return Boolean(aiInfo && aiInfo.enabled === true && aiInfo.available === true &&
+        aiInfo.configuration_valid === true);
 }
 
 function showDatasetOverview(dataset) {
@@ -342,7 +665,7 @@ function showConfusionMatrix(classificationMetrics) {
 
     var cornerCell = document.createElement("th");
     cornerCell.setAttribute("scope", "col");
-    cornerCell.textContent = "Real status";
+    cornerCell.textContent = "Observed status";
     headRow.appendChild(cornerCell);
 
     for (var index = 0; index < classificationMetrics.labels.length; index++) {
@@ -378,7 +701,7 @@ function loadOptions() {
     return requestApi("/api/options", "GET", null).then(function (options) {
         appState.options = options;
 
-        // The hospital dropdown uses the real hospital identifiers.
+        // The hospital dropdown uses identifiers from the configured dataset.
         var hospitalSelect = element(crisisFields.hospital);
         clearElement(hospitalSelect);
         for (var index = 0; index < options.hospitals.length; index++) {
@@ -399,11 +722,22 @@ function loadOptions() {
 
 // ============================================================================
 // SECTION 5: LOAD LATEST HOSPITAL RECORD
-// Fills the crisis form with the latest real dataset record of one hospital.
+// Fills the crisis form with the latest configured dataset record for one hospital.
 // ============================================================================
 
-function loadLatestRecord(hospitalId) {
-    return requestApi("/api/hospital/" + hospitalId + "/latest", "GET", null).then(function (record) {
+function loadLatestRecord(hospitalId, requestKind) {
+    var requestTicket = beginRequest("latest");
+    appState.pending.latest = true;
+    appState.latestRequestKind = requestKind || "required";
+    setButtonLoading("loadLatestButton", true, "Load Latest Dataset Record");
+    refreshWorkflowControls();
+
+    return requestApi("/api/hospital/" + hospitalId + "/latest", "GET", null, requestTicket.signal).then(function (record) {
+        if (!requestIsCurrent("latest", requestTicket) ||
+                String(element(crisisFields.hospital).value) !== String(hospitalId)) {
+            return null;
+        }
+
         element(crisisFields.timestamp).value = record.timestamp_input;
         element(crisisFields.disasterType).value = record.disaster_type;
         element(crisisFields.triage).value = record.triage_level;
@@ -423,8 +757,33 @@ function loadLatestRecord(hospitalId) {
         setText("latestRecordNote", record.hospital_label + " - recorded at " + record.timestamp +
             ". You can change any value to describe a new condition.");
         setText("topbarHospital", record.hospital_label);
+        appState.scenarioBasis = "Latest dataset record · " + record.timestamp;
+        clearValidationErrors("crisisForm");
+        setVisible("formErrorBox", false);
+        updateScenarioStrip();
 
         return record;
+    }).catch(function (error) {
+        if (isAbortError(error) || !requestIsCurrent("latest", requestTicket)) {
+            return null;
+        }
+        throw error;
+    }).then(function (record) {
+        if (finishRequest("latest", requestTicket)) {
+            appState.pending.latest = false;
+            appState.latestRequestKind = null;
+            setButtonLoading("loadLatestButton", false, "Load Latest Dataset Record");
+            refreshWorkflowControls();
+        }
+        return record;
+    }, function (error) {
+        if (finishRequest("latest", requestTicket)) {
+            appState.pending.latest = false;
+            appState.latestRequestKind = null;
+            setButtonLoading("loadLatestButton", false, "Load Latest Dataset Record");
+            refreshWorkflowControls();
+        }
+        throw error;
     });
 }
 
@@ -439,44 +798,54 @@ function readNumericField(fieldId, labelText, minimumValue, maximumValue, errors
     var rawValue = element(fieldId).value;
 
     if (rawValue === null || String(rawValue).trim() === "") {
-        errors.push(labelText + " is required.");
+        addValidationError(fieldId, labelText + " is required.", errors);
         return null;
     }
 
     var numberValue = Number(rawValue);
     if (isNaN(numberValue) || !isFinite(numberValue)) {
-        errors.push(labelText + " must be a normal number.");
+        addValidationError(fieldId, labelText + " must be a normal number.", errors);
         return null;
     }
 
     if (numberValue < minimumValue) {
-        errors.push(labelText + " cannot be below " + minimumValue + ".");
+        addValidationError(fieldId, labelText + " cannot be below " + minimumValue + ".", errors);
         return null;
     }
 
     if (maximumValue !== null && numberValue > maximumValue) {
-        errors.push(labelText + " cannot be above " + maximumValue + ".");
+        addValidationError(fieldId, labelText + " cannot be above " + maximumValue + ".", errors);
         return null;
     }
 
     return numberValue;
 }
 
+function readWholeNumberField(fieldId, labelText, minimumValue, errors) {
+    var numberValue = readNumericField(fieldId, labelText, minimumValue, null, errors);
+    if (numberValue !== null && Math.floor(numberValue) !== numberValue) {
+        addValidationError(fieldId, labelText + " must be a whole number.", errors);
+        return null;
+    }
+    return numberValue;
+}
+
 // Build the snapshot object that both /api/predict and /api/allocate accept.
 function readCrisisForm() {
+    clearValidationErrors("crisisForm");
     var errors = [];
     var snapshot = {};
 
     var hospitalValue = element(crisisFields.hospital).value;
     if (!hospitalValue) {
-        errors.push("Please choose a hospital.");
+        addValidationError(crisisFields.hospital, "Please choose a hospital.", errors);
     } else {
         snapshot.hospital_id = Number(hospitalValue);
     }
 
     var timestampValue = element(crisisFields.timestamp).value;
     if (!timestampValue) {
-        errors.push("Please choose a date and time.");
+        addValidationError(crisisFields.timestamp, "Please choose a date and time.", errors);
     } else {
         snapshot.timestamp = timestampValue;
     }
@@ -494,7 +863,7 @@ function readCrisisForm() {
         var selectedValue = element(fieldId).value;
 
         if (!selectedValue) {
-            errors.push(labelText + " is required.");
+            addValidationError(fieldId, labelText + " is required.", errors);
         } else {
             snapshot[keyName] = selectedValue;
         }
@@ -538,36 +907,70 @@ function readCrisisForm() {
 function handleCrisisSubmit(submitEvent) {
     submitEvent.preventDefault();
 
+    if (!appState.ready || appState.pending.prediction) {
+        return;
+    }
+
     var formData = readCrisisForm();
     if (formData.errors.length > 0) {
         showListMessage("formErrorBox", "Please correct these fields", formData.errors);
+        focusFirstInvalid("crisisForm");
         return;
     }
     setVisible("formErrorBox", false);
 
+    cancelRequest("briefing");
+    var requestTicket = beginRequest("prediction");
+    var submittedRevision = appState.scenarioRevision;
+    var submittedSnapshot = JSON.parse(JSON.stringify(formData.snapshot));
+    appState.pending.prediction = true;
     setButtonLoading("analyzeButton", true, "Analyze Crisis and Build Recovery Plan");
+    refreshWorkflowControls();
 
-    requestApi("/api/predict", "POST", formData.snapshot).then(function (result) {
+    requestApi("/api/predict", "POST", formData.snapshot, requestTicket.signal).then(function (result) {
+        if (!requestIsCurrent("prediction", requestTicket)) {
+            return null;
+        }
         appState.predictionResult = result;
         appState.hasPrediction = true;
-        showPredictionResult(result);
+        appState.predictionStale = submittedRevision !== appState.scenarioRevision;
+        appState.lastPredictionSnapshot = submittedSnapshot;
+        appState.predictionGeneration += 1;
+        showPredictionResult(result, submittedSnapshot);
         showRecoveryStrategies(result);
         showDecisionRecommendations(result);
+        setVisible("predictionStaleNotice", appState.predictionStale);
+        if (appState.predictionStale) {
+            setText("predictionStaleText", "A Step 1 value changed while this prediction was being calculated.");
+        }
         updateNavigationState();
         showView("results");
-        loadBriefing(formData.snapshot);
+        updateScenarioStrip();
+        loadBriefing(submittedSnapshot, appState.predictionGeneration);
+        return result;
     }).catch(function (error) {
-        showListMessage("formErrorBox", "The analysis could not be completed", [error.message]);
+        if (!isAbortError(error) && requestIsCurrent("prediction", requestTicket)) {
+            showListMessage("formErrorBox", "The analysis could not be completed", [error.message]);
+        }
     }).then(function () {
-        setButtonLoading("analyzeButton", false, "Analyze Crisis and Build Recovery Plan");
+        if (finishRequest("prediction", requestTicket)) {
+            appState.pending.prediction = false;
+            setButtonLoading("analyzeButton", false, "Analyze Crisis and Build Recovery Plan");
+            refreshWorkflowControls();
+        }
     });
 }
 
-function showPredictionResult(result) {
+function showPredictionResult(result, snapshot) {
     setVisible("resultsEmpty", false);
     setVisible("resultsContent", true);
 
     var predictions = result.predictions;
+
+    setText("resultProvenanceHospital", result.hospital_label || selectedHospitalLabel());
+    setText("resultProvenanceTimestamp", displayScenarioTimestamp(snapshot.timestamp));
+    setText("resultProvenanceReceived", new Date().toLocaleString());
+    setText("resultProvenanceBasis", appState.scenarioBasis);
 
     setText("cardPatientsValue", String(predictions.patients_next_2h.value));
     setText("cardPatientsRange", "Likely model range: " + predictions.patients_next_2h.low + " to " + predictions.patients_next_2h.high);
@@ -611,20 +1014,28 @@ function showPredictionResult(result) {
 
     showPressureFactors(result.pressure_factors);
     showSimilarCases(result.similar_cases);
-    updateResourceChart(result);
+    populateResourceDataTable(result);
 }
 
 // Ask the server for the written briefing that belongs to this exact situation.
-function loadBriefing(snapshot) {
+function loadBriefing(snapshot, predictionGeneration) {
+    var requestTicket = beginRequest("briefing");
     setText("briefingSummary", "Preparing the briefing...");
     clearElement(element("briefingRecommendations"));
     setText("briefingSourceNote", "");
 
-    requestApi("/api/briefing", "POST", snapshot).then(function (briefing) {
-        showBriefing(briefing);
+    requestApi("/api/briefing", "POST", snapshot, requestTicket.signal).then(function (briefing) {
+        if (requestIsCurrent("briefing", requestTicket) &&
+                predictionGeneration === appState.predictionGeneration && !appState.predictionStale) {
+            showBriefing(briefing);
+        }
     }).catch(function (error) {
-        setText("briefingSummary", "The briefing could not be created: " + error.message);
-        setText("briefingSourceNote", "The prediction values above are not affected by this.");
+        if (!isAbortError(error) && requestIsCurrent("briefing", requestTicket)) {
+            setText("briefingSummary", "The briefing could not be created: " + error.message);
+            setText("briefingSourceNote", "The prediction values above are not affected by this.");
+        }
+    }).then(function () {
+        finishRequest("briefing", requestTicket);
     });
 }
 
@@ -677,7 +1088,7 @@ function showSimilarCases(similarCases) {
 
     setVisible("similarCasesEmpty", false);
     setVisible("similarCasesList", true);
-    setText("similarFilterNote", "Real dataset rows selected with this filter: " + similarCases.filter_used + ".");
+    setText("similarFilterNote", "Dataset rows selected with this filter: " + similarCases.filter_used + ".");
 
     setText("similarCount", String(similarCases.count));
     setText("similarHighRisk", formatNumber(similarCases.high_risk_percent, 1) + "%");
@@ -776,11 +1187,16 @@ function showDecisionRecommendations(result) {
 function handleAllocationSubmit(submitEvent) {
     submitEvent.preventDefault();
 
+    if (!appState.ready || appState.pending.allocation) {
+        return;
+    }
+
+    clearValidationErrors("allocationForm");
     var errors = [];
     var reserve = {
-        icu_beds: readNumericField("icuReserve", "Emergency ICU beds available", 0, null, errors),
-        ventilators: readNumericField("ventilatorReserve", "Emergency ventilators available", 0, null, errors),
-        staff: readNumericField("staffReserve", "Emergency staff units available", 0, null, errors)
+        icu_beds: readWholeNumberField("icuReserve", "Emergency ICU beds available", 0, errors),
+        ventilators: readWholeNumberField("ventilatorReserve", "Emergency ventilators available", 0, errors),
+        staff: readWholeNumberField("staffReserve", "Emergency staff units available", 0, errors)
     };
 
     var weights = {
@@ -792,7 +1208,7 @@ function handleAllocationSubmit(submitEvent) {
 
     var hospitalValue = element(crisisFields.hospital).value;
     if (!hospitalValue) {
-        errors.push("Please choose a hospital in the crisis form first.");
+        addValidationError(crisisFields.hospital, "Please choose a hospital in the crisis form first.", errors);
     }
 
     var useScenario = element("useCurrentScenario").checked;
@@ -811,6 +1227,7 @@ function handleAllocationSubmit(submitEvent) {
 
     if (errors.length > 0) {
         showListMessage("allocationErrorBox", "Please correct these fields", errors);
+        focusFirstInvalid("allocationForm");
         return;
     }
     setVisible("allocationErrorBox", false);
@@ -823,19 +1240,35 @@ function handleAllocationSubmit(submitEvent) {
         snapshot: snapshot
     };
 
+    var requestTicket = beginRequest("allocation");
+    appState.pending.allocation = true;
     setButtonLoading("buildAllocationButton", true, "Build Allocation Plan");
+    refreshWorkflowControls();
 
-    requestApi("/api/allocate", "POST", requestBody).then(function (result) {
+    requestApi("/api/allocate", "POST", requestBody, requestTicket.signal).then(function (result) {
+        if (!requestIsCurrent("allocation", requestTicket)) {
+            return null;
+        }
         appState.allocationResult = result;
         appState.hasAllocation = true;
+        appState.allocationStale = false;
+        appState.showAllAllocationRows = false;
         showAllocationResult(result);
-        element("downloadAllocationButton").disabled = false;
+        setVisible("allocationStaleNotice", false);
         updateNavigationState();
+        refreshWorkflowControls();
         showView("allocation");
+        return result;
     }).catch(function (error) {
-        showListMessage("allocationErrorBox", "The allocation plan could not be built", [error.message]);
+        if (!isAbortError(error) && requestIsCurrent("allocation", requestTicket)) {
+            showListMessage("allocationErrorBox", "The allocation plan could not be built", [error.message]);
+        }
     }).then(function () {
-        setButtonLoading("buildAllocationButton", false, "Build Allocation Plan");
+        if (finishRequest("allocation", requestTicket)) {
+            appState.pending.allocation = false;
+            setButtonLoading("buildAllocationButton", false, "Build Allocation Plan");
+            refreshWorkflowControls();
+        }
     });
 }
 
@@ -892,6 +1325,7 @@ function showAllocationResult(result) {
 
 function showAllocationTable(result) {
     var tableBody = element("allocationTableBody");
+    var toggleButton = element("toggleAllocationRows");
     clearElement(tableBody);
 
     // Only the highest priority hospitals are shown first, so the view stays calm.
@@ -900,13 +1334,18 @@ function showAllocationTable(result) {
         visibleCount = 10;
     }
 
+    setVisible("toggleAllocationRows", result.rows.length > 10);
     if (visibleCount < result.rows.length) {
         setText("allocationTableNote", "Showing the top " + visibleCount + " of " + result.rows.length +
             " hospitals, ranked by priority score.");
         setText("toggleAllocationRows", "Show all " + result.rows.length + " hospitals");
+        toggleButton.setAttribute("aria-expanded", "false");
     } else {
         setText("allocationTableNote", "Showing all " + result.rows.length + " hospitals, ranked by priority score.");
-        setText("toggleAllocationRows", "Show top 10 only");
+        if (result.rows.length > 10) {
+            setText("toggleAllocationRows", "Show top 10 only");
+            toggleButton.setAttribute("aria-expanded", "true");
+        }
     }
 
     for (var index = 0; index < visibleCount; index++) {
@@ -954,6 +1393,7 @@ function showAllocationTable(result) {
         detailButton.type = "button";
         detailButton.className = "link-button";
         detailButton.textContent = "Show";
+        detailButton.setAttribute("aria-expanded", "false");
         actionCell.appendChild(detailButton);
         tableRow.appendChild(actionCell);
 
@@ -961,6 +1401,9 @@ function showAllocationTable(result) {
 
         var detailRow = document.createElement("tr");
         detailRow.className = "detail-panel hidden";
+        detailRow.id = "allocation-detail-" + index;
+        detailButton.setAttribute("aria-controls", detailRow.id);
+        detailButton.setAttribute("aria-label", "Show details for " + row.hospital_label);
 
         var detailCell = document.createElement("td");
         detailCell.setAttribute("colspan", "12");
@@ -979,7 +1422,7 @@ function showAllocationTable(result) {
         detailRow.appendChild(detailCell);
         tableBody.appendChild(detailRow);
 
-        attachDetailToggle(detailButton, detailRow);
+        attachDetailToggle(detailButton, detailRow, row.hospital_label);
     }
 }
 
@@ -993,14 +1436,18 @@ function toggleAllocationRows() {
 }
 
 // Connect one detail button to its own hidden row.
-function attachDetailToggle(detailButton, detailRow) {
+function attachDetailToggle(detailButton, detailRow, hospitalLabel) {
     detailButton.addEventListener("click", function () {
         if (detailRow.classList.contains("hidden")) {
             detailRow.classList.remove("hidden");
             detailButton.textContent = "Hide";
+            detailButton.setAttribute("aria-expanded", "true");
+            detailButton.setAttribute("aria-label", "Hide details for " + hospitalLabel);
         } else {
             detailRow.classList.add("hidden");
             detailButton.textContent = "Show";
+            detailButton.setAttribute("aria-expanded", "false");
+            detailButton.setAttribute("aria-label", "Show details for " + hospitalLabel);
         }
     });
 }
@@ -1008,14 +1455,31 @@ function attachDetailToggle(detailButton, detailRow) {
 
 // ============================================================================
 // SECTION 10: LOAD AND DISPLAY HISTORY
-// Reads /api/history and shows the real weekly trends of one hospital.
+// Reads /api/history and shows weekly dataset trends for one hospital.
 // ============================================================================
 
 function loadHistory(hospitalId) {
-    return requestApi("/api/history/" + hospitalId, "GET", null).then(function (history) {
+    var requestTicket = beginRequest("history");
+    return requestApi("/api/history/" + hospitalId, "GET", null, requestTicket.signal).then(function (history) {
+        if (!requestIsCurrent("history", requestTicket) ||
+                String(element(crisisFields.hospital).value) !== String(hospitalId)) {
+            return null;
+        }
         appState.historyResult = history;
         showHistory(history);
+        clearAppStatus("history");
         return history;
+    }).catch(function (error) {
+        if (isAbortError(error) || !requestIsCurrent("history", requestTicket)) {
+            return null;
+        }
+        throw error;
+    }).then(function (history) {
+        finishRequest("history", requestTicket);
+        return history;
+    }, function (error) {
+        finishRequest("history", requestTicket);
+        throw error;
     });
 }
 
@@ -1025,6 +1489,9 @@ function showHistory(history) {
     if (history.weekly_labels.length === 0) {
         setVisible("historyEmpty", true);
         setVisible("historyContent", false);
+        clearElement(element("historyDataTableBody"));
+        destroyChart("historyRisk");
+        destroyChart("historyResource");
         return;
     }
 
@@ -1047,7 +1514,10 @@ function showHistory(history) {
         "them is called Stable. Records used: " + history.summary.record_count + " between " +
         history.summary.first_record + " and " + history.summary.last_record + ".");
 
-    updateHistoryCharts(history);
+    populateHistoryDataTable(history);
+    if (appState.currentView === "resilience") {
+        updateHistoryCharts(history);
+    }
 }
 
 function setTrendText(elementId, trend) {
@@ -1071,6 +1541,89 @@ function setTrendText(elementId, trend) {
 // Old Chart.js instances are destroyed before a new chart is created.
 // ============================================================================
 
+function appendDataTableRow(tableBody, values) {
+    var row = document.createElement("tr");
+    for (var index = 0; index < values.length; index++) {
+        var cell = document.createElement(index === 0 ? "th" : "td");
+        if (index === 0) {
+            cell.setAttribute("scope", "row");
+        }
+        cell.textContent = String(values[index]);
+        row.appendChild(cell);
+    }
+    tableBody.appendChild(row);
+}
+
+function populateResourceDataTable(result) {
+    var tableBody = element("resourceDataTableBody");
+    clearElement(tableBody);
+    var predictions = result.predictions;
+    appendDataTableRow(tableBody, ["Patients in next 2 hours", predictions.patients_next_2h.value]);
+    appendDataTableRow(tableBody, ["ICU beds", predictions.icu_beds.value]);
+    appendDataTableRow(tableBody, ["Ventilators", predictions.ventilators.value]);
+    appendDataTableRow(tableBody, ["Staff units", predictions.staff.value]);
+}
+
+function populateHistoryDataTable(history) {
+    var tableBody = element("historyDataTableBody");
+    clearElement(tableBody);
+    for (var index = 0; index < history.weekly_labels.length; index++) {
+        appendDataTableRow(tableBody, [
+            history.weekly_labels[index],
+            history.weekly_values.overload_risk_percent[index],
+            history.weekly_values.bed_occupancy_percent[index],
+            history.weekly_values.icu_occupancy_percent[index],
+            history.weekly_values.required_icu_beds[index],
+            history.weekly_values.required_ventilators[index],
+            history.weekly_values.required_staff[index]
+        ]);
+    }
+}
+
+function setChartFallback(canvasIds, noticeId, detailsId, messageText, shouldShowFallback) {
+    for (var index = 0; index < canvasIds.length; index++) {
+        var canvas = element(canvasIds[index]);
+        if (canvas && canvas.parentNode) {
+            canvas.parentNode.classList.toggle("hidden", shouldShowFallback);
+        }
+    }
+    setText(noticeId, messageText);
+    setVisible(noticeId, shouldShowFallback);
+    var details = element(detailsId);
+    if (details && shouldShowFallback) {
+        details.open = true;
+    }
+}
+
+function connectChartLibraryLoader() {
+    var chartScript = element("chartJsScript");
+    if (!chartScript) {
+        return;
+    }
+    chartScript.addEventListener("load", function () {
+        if (appState.currentView === "results" && appState.predictionResult) {
+            updateResourceChart(appState.predictionResult);
+        }
+        if (appState.currentView === "resilience" && appState.historyResult) {
+            updateHistoryCharts(appState.historyResult);
+        }
+    });
+    chartScript.addEventListener("error", function () {
+        if (appState.predictionResult) {
+            setChartFallback(["resourceChart"], "resourceChartNotice", "resourceDataDetails",
+                "The visual chart library could not be loaded. The same prediction values are shown in the table below.", true);
+        }
+        if (appState.historyResult) {
+            setChartFallback(["historyRiskChart", "historyResourceChart"], "historyChartNotice", "historyDataDetails",
+                "The visual chart library could not be loaded. The same weekly dataset values are shown in the table below.", true);
+        }
+    });
+}
+
+function chartAnimationEnabled() {
+    return !(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
 function destroyChart(chartName) {
     if (appState.charts[chartName]) {
         appState.charts[chartName].destroy();
@@ -1081,10 +1634,17 @@ function destroyChart(chartName) {
 function updateResourceChart(result) {
     destroyChart("resource");
 
-    var context = element("resourceChart").getContext("2d");
-    var predictions = result.predictions;
+    if (typeof window.Chart !== "function") {
+        setChartFallback(["resourceChart"], "resourceChartNotice", "resourceDataDetails",
+            "The visual chart is unavailable. The same prediction values are shown in the table below.", true);
+        return;
+    }
 
-    appState.charts.resource = new Chart(context, {
+    try {
+        var context = element("resourceChart").getContext("2d");
+        var predictions = result.predictions;
+
+        appState.charts.resource = new window.Chart(context, {
         type: "bar",
         data: {
             labels: ["Patients (2h)", "ICU beds", "Ventilators", "Staff units"],
@@ -1101,6 +1661,7 @@ function updateResourceChart(result) {
             }]
         },
         options: {
+            animation: chartAnimationEnabled(),
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
@@ -1111,15 +1672,28 @@ function updateResourceChart(result) {
                 y: { beginAtZero: true, title: { display: true, text: "Estimated units" } }
             }
         }
-    });
+        });
+        setChartFallback(["resourceChart"], "resourceChartNotice", "resourceDataDetails", "", false);
+    } catch (error) {
+        destroyChart("resource");
+        setChartFallback(["resourceChart"], "resourceChartNotice", "resourceDataDetails",
+            "The visual chart could not be rendered. The same prediction values are shown in the table below.", true);
+    }
 }
 
 function updateHistoryCharts(history) {
     destroyChart("historyRisk");
     destroyChart("historyResource");
 
+    if (typeof window.Chart !== "function") {
+        setChartFallback(["historyRiskChart", "historyResourceChart"], "historyChartNotice", "historyDataDetails",
+            "The visual charts are unavailable. The same weekly dataset values are shown in the table below.", true);
+        return;
+    }
+
+    try {
     var riskContext = element("historyRiskChart").getContext("2d");
-    appState.charts.historyRisk = new Chart(riskContext, {
+    appState.charts.historyRisk = new window.Chart(riskContext, {
         type: "line",
         data: {
             labels: history.weekly_labels,
@@ -1148,10 +1722,11 @@ function updateHistoryCharts(history) {
             ]
         },
         options: {
+            animation: chartAnimationEnabled(),
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                title: { display: true, text: "Real historical dataset trends - weekly averages" }
+                title: { display: true, text: "Dataset time-series trends - weekly averages" }
             },
             scales: {
                 y: { beginAtZero: true, max: 100, title: { display: true, text: "Percent" } },
@@ -1161,7 +1736,7 @@ function updateHistoryCharts(history) {
     });
 
     var resourceContext = element("historyResourceChart").getContext("2d");
-    appState.charts.historyResource = new Chart(resourceContext, {
+    appState.charts.historyResource = new window.Chart(resourceContext, {
         type: "line",
         data: {
             labels: history.weekly_labels,
@@ -1176,8 +1751,8 @@ function updateHistoryCharts(history) {
                 {
                     label: "Ventilators required",
                     data: history.weekly_values.required_ventilators,
-                    borderColor: "#a86a06",
-                    backgroundColor: "rgba(168, 106, 6, 0.12)",
+                    borderColor: "#835000",
+                    backgroundColor: "rgba(131, 80, 0, 0.12)",
                     tension: 0.25
                 },
                 {
@@ -1190,10 +1765,11 @@ function updateHistoryCharts(history) {
             ]
         },
         options: {
+            animation: chartAnimationEnabled(),
             responsive: true,
             maintainAspectRatio: false,
             plugins: {
-                title: { display: true, text: "Real historical dataset trends - weekly averages" }
+                title: { display: true, text: "Dataset time-series trends - weekly averages" }
             },
             scales: {
                 y: { beginAtZero: true, title: { display: true, text: "Recorded units" } },
@@ -1201,17 +1777,28 @@ function updateHistoryCharts(history) {
             }
         }
     });
+        setChartFallback(["historyRiskChart", "historyResourceChart"], "historyChartNotice", "historyDataDetails", "", false);
+    } catch (error) {
+        destroyChart("historyRisk");
+        destroyChart("historyResource");
+        setChartFallback(["historyRiskChart", "historyResourceChart"], "historyChartNotice", "historyDataDetails",
+            "The visual charts could not be rendered. The same weekly dataset values are shown in the table below.", true);
+    }
 }
 
 
 // ============================================================================
 // SECTION 12: EXPORT ALLOCATION CSV
-// Builds a CSV file in the browser from the latest real allocation result.
+// Builds a CSV file in the browser from the latest allocation result.
 // ============================================================================
 
 // Put quotation marks around one value so commas cannot break the CSV file.
 function csvCell(value) {
     var text = String(value);
+    // Spreadsheet applications may execute formula-leading text even when quoted.
+    if (typeof value === "string" && /^[=+\-@\t\r]/.test(text)) {
+        text = "'" + text;
+    }
     text = text.split('"').join('""');
     return '"' + text + '"';
 }
@@ -1293,11 +1880,28 @@ function setButtonLoading(buttonId, isLoading, normalText) {
     if (isLoading) {
         button.disabled = true;
         button.classList.add("is-loading");
-        button.textContent = "Working";
+        var loadingLabels = {
+            analyzeButton: "Analyzing crisis",
+            loadLatestButton: "Loading latest record",
+            buildAllocationButton: "Building allocation plan",
+            chatSendButton: "Sending question"
+        };
+        button.textContent = loadingLabels[buttonId] || "Working";
     } else {
-        button.disabled = false;
         button.classList.remove("is-loading");
         button.textContent = normalText;
+        refreshWorkflowControls();
+    }
+
+    var busyContainers = {
+        analyzeButton: "crisisForm",
+        loadLatestButton: "crisisForm",
+        buildAllocationButton: "allocationForm",
+        chatSendButton: "chatForm"
+    };
+    var busyContainer = element(busyContainers[buttonId]);
+    if (busyContainer) {
+        busyContainer.setAttribute("aria-busy", isLoading ? "true" : "false");
     }
 }
 
@@ -1325,13 +1929,9 @@ function showListMessage(boxId, titleText, messages) {
 }
 
 function showStartupError(messageText) {
-    showListMessage("appStatusBanner", "The application is not ready", [messageText]);
-
-    // Every model action is switched off while the startup problem is not solved.
-    element("analyzeButton").disabled = true;
-    element("loadLatestButton").disabled = true;
-    element("buildAllocationButton").disabled = true;
-    element("chatSendButton").disabled = true;
+    appState.ready = false;
+    setAppStatus("startup", "error", "The application is not ready", [messageText]);
+    refreshWorkflowControls();
 }
 
 
@@ -1340,40 +1940,93 @@ function showStartupError(messageText) {
 // Connects the buttons and runs the first data load when the page opens.
 // ============================================================================
 
+function clearCrisisRecordFields() {
+    Object.keys(crisisFields).forEach(function (fieldName) {
+        if (fieldName === "hospital") {
+            return;
+        }
+        var field = element(crisisFields[fieldName]);
+        if (field) {
+            field.value = "";
+        }
+    });
+    clearValidationErrors("crisisForm");
+}
+
 function handleHospitalChange() {
     var hospitalId = element(crisisFields.hospital).value;
     if (!hospitalId) {
         return;
     }
 
-    loadLatestRecord(hospitalId).catch(function (error) {
-        showListMessage("formErrorBox", "The latest dataset record could not be loaded", [error.message]);
+    appState.scenarioRevision += 1;
+    appState.scenarioBasis = "Loading the selected hospital's latest dataset record";
+    setText("topbarHospital", selectedHospitalLabel());
+    invalidatePrediction("The selected hospital changed after this result was calculated.");
+    invalidateAllocation("The selected hospital changed after this report was built.");
+    clearCrisisRecordFields();
+    setText("latestRecordNote", "Loading the selected hospital's latest dataset record.");
+    updateScenarioStrip();
+
+    loadLatestRecord(hospitalId, "hospital-change").catch(function (error) {
+        if (!isAbortError(error)) {
+            setText("latestRecordNote", "No latest dataset record is loaded for the selected hospital.");
+            showListMessage("formErrorBox", "The latest dataset record could not be loaded", [error.message]);
+        }
     });
 
     loadHistory(hospitalId).catch(function (error) {
-        setVisible("historyContent", false);
-        setVisible("historyEmpty", true);
-        setText("historyHospitalLabel", "this hospital");
-        showListMessage("appStatusBanner", "The history could not be loaded", [error.message]);
+        if (!isAbortError(error)) {
+            setVisible("historyContent", false);
+            setVisible("historyEmpty", true);
+            setText("historyHospitalLabel", "this hospital");
+            setAppStatus("history", "warning", "The dataset trends could not be loaded", [error.message]);
+        }
     });
 }
 
 function handleLoadLatestClick() {
+    if (!appState.ready || appState.pending.latest) {
+        return;
+    }
     var hospitalId = element(crisisFields.hospital).value;
     if (!hospitalId) {
         showListMessage("formErrorBox", "Please choose a hospital", ["A hospital must be selected first."]);
         return;
     }
 
-    setButtonLoading("loadLatestButton", true, "Load Latest Dataset Record");
+    markScenarioEdited("The latest dataset record was loaded after this result was calculated.");
+    appState.scenarioBasis = "Loading the latest dataset record";
+    updateScenarioStrip();
 
-    loadLatestRecord(hospitalId).then(function () {
+    loadLatestRecord(hospitalId, "manual").then(function () {
         setVisible("formErrorBox", false);
     }).catch(function (error) {
-        showListMessage("formErrorBox", "The latest dataset record could not be loaded", [error.message]);
-    }).then(function () {
-        setButtonLoading("loadLatestButton", false, "Load Latest Dataset Record");
+        if (!isAbortError(error)) {
+            showListMessage("formErrorBox", "The latest dataset record could not be loaded", [error.message]);
+        }
     });
+}
+
+function handleCrisisFormInput(inputEvent) {
+    var target = inputEvent.target;
+    if (!target || target.id === crisisFields.hospital) {
+        return;
+    }
+    // A manual edit wins over an in-flight prefill. Cancel before recording the
+    // edited scenario so an older latest-record response cannot replace it.
+    cancelPendingLatestRecordForManualEdit();
+    clearFieldError(target);
+    setVisible("formErrorBox", false);
+    markScenarioEdited("A Step 1 value changed after this result was calculated.");
+}
+
+function handleAllocationFormInput(inputEvent) {
+    if (inputEvent.target) {
+        clearFieldError(inputEvent.target);
+    }
+    setVisible("allocationErrorBox", false);
+    invalidateAllocation("The reserve, priorities or scenario setting changed after this report was built.");
 }
 
 // Keep the small number next to every weight slider up to date.
@@ -1391,7 +2044,9 @@ function connectWeightSlider(sliderId, outputId) {
 
 function connectEventListeners() {
     element("crisisForm").addEventListener("submit", handleCrisisSubmit);
+    element("crisisForm").addEventListener("input", handleCrisisFormInput);
     element("allocationForm").addEventListener("submit", handleAllocationSubmit);
+    element("allocationForm").addEventListener("input", handleAllocationFormInput);
     element("loadLatestButton").addEventListener("click", handleLoadLatestClick);
     element("downloadAllocationButton").addEventListener("click", downloadAllocationCsv);
     element("toggleAllocationRows").addEventListener("click", toggleAllocationRows);
@@ -1407,12 +2062,15 @@ function connectEventListeners() {
 }
 
 function startApplication() {
+    appState.ready = false;
     connectEventListeners();
+    connectChartLibraryLoader();
     updateNavigationState();
-    startChatConversation();
+    refreshWorkflowControls();
 
     // The overview is the opening view, so its sidebar button starts active.
-    showView("overview");
+    showView("overview", { updateHash: false, focus: false });
+    var requestedView = viewNameFromHash();
 
     loadStatus().then(function (status) {
         if (!status.ready) {
@@ -1420,16 +2078,44 @@ function startApplication() {
         }
         return loadOptions();
     }).then(function (options) {
-        if (!options || options.hospitals.length === 0) {
+        if (!options) {
             return null;
+        }
+        if (options.hospitals.length === 0) {
+            throw new Error("The dataset does not contain a hospital to select.");
         }
 
         // The first hospital is selected so the page is never empty.
         var firstHospitalId = options.hospitals[0].id;
         element(crisisFields.hospital).value = String(firstHospitalId);
 
-        return loadLatestRecord(firstHospitalId).then(function () {
-            return loadHistory(firstHospitalId);
+        return loadLatestRecord(firstHospitalId, "bootstrap").then(function (record) {
+            if (!record) {
+                throw new Error("The first hospital record could not be loaded.");
+            }
+
+            appState.ready = true;
+            clearAppStatus();
+            refreshWorkflowControls();
+            updateScenarioStrip();
+            startChatConversation();
+
+            if (requestedView && requestedView !== "overview") {
+                if (isViewUnlocked(requestedView)) {
+                    showView(requestedView, { updateHash: false, focus: true });
+                } else {
+                    explainLockedView(requestedView);
+                }
+            } else {
+                replaceViewHash("overview");
+            }
+
+            loadHistory(firstHospitalId).catch(function (error) {
+                if (!isAbortError(error)) {
+                    setAppStatus("history", "warning", "The dataset trends could not be loaded", [error.message]);
+                }
+            });
+            return record;
         });
     }).catch(function (error) {
         showStartupError(error.message);
@@ -1442,7 +2128,7 @@ function startApplication() {
 // Only one view is shown at a time, so each screen has one clear purpose.
 // ============================================================================
 
-// Views that stay locked until the matching real result exists.
+// Views that stay locked until the matching result exists.
 var viewRequirements = {
     results: "prediction",
     strategies: "prediction",
@@ -1451,7 +2137,49 @@ var viewRequirements = {
 };
 
 // Show one view and mark its sidebar button as the active one.
-function showView(viewName) {
+function viewNameFromHash() {
+    var hashValue = window.location.hash.replace(/^#/, "");
+    if (hashValue.indexOf("view-") === 0) {
+        hashValue = hashValue.slice(5);
+    }
+    return element("view-" + hashValue) ? hashValue : null;
+}
+
+function replaceViewHash(viewName) {
+    if (window.history && window.history.replaceState) {
+        window.history.replaceState({ view: viewName }, "", "#" + viewName);
+    } else {
+        window.location.replace("#" + viewName);
+    }
+}
+
+function pushViewHash(viewName) {
+    if (window.location.hash === "#" + viewName) {
+        return;
+    }
+    if (window.history && window.history.pushState) {
+        window.history.pushState({ view: viewName }, "", "#" + viewName);
+    } else {
+        window.location.hash = viewName;
+    }
+}
+
+function focusViewHeading(targetView) {
+    var heading = targetView ? targetView.querySelector("h2") : null;
+    if (!heading) {
+        element("viewHost").focus();
+        return;
+    }
+    heading.setAttribute("tabindex", "-1");
+    try {
+        heading.focus({ preventScroll: true });
+    } catch (error) {
+        heading.focus();
+    }
+}
+
+function showView(viewName, viewOptions) {
+    var options = viewOptions || {};
     var targetView = element("view-" + viewName);
     if (!targetView) {
         return;
@@ -1483,8 +2211,20 @@ function showView(viewName) {
     appState.currentView = viewName;
     setText("topbarTitle", targetView.getAttribute("data-title"));
 
-    closeSidebar();
+    closeSidebar(false);
+    if (options.updateHash !== false) {
+        pushViewHash(viewName);
+    }
     scrollViewToTop();
+    if (viewName === "results" && appState.predictionResult) {
+        updateResourceChart(appState.predictionResult);
+    }
+    if (viewName === "resilience" && appState.historyResult) {
+        updateHistoryCharts(appState.historyResult);
+    }
+    if (options.focus !== false) {
+        focusViewHeading(targetView);
+    }
 }
 
 // Report whether one view already has the result it needs.
@@ -1515,16 +2255,21 @@ function updateNavigationState() {
             continue;
         }
 
+        var isStale = (viewRequirements[viewName] === "prediction" && appState.predictionStale) ||
+            (viewRequirements[viewName] === "allocation" && appState.allocationStale);
+
         if (isViewUnlocked(viewName)) {
             button.classList.remove("is-locked");
-            button.classList.add("is-ready");
+            button.classList.toggle("is-ready", !isStale);
+            button.classList.toggle("is-stale", isStale);
             button.removeAttribute("aria-disabled");
             if (stateLabel) {
-                stateLabel.textContent = "Ready";
+                stateLabel.textContent = isStale ? "Stale" : "Ready";
             }
         } else {
             button.classList.add("is-locked");
             button.classList.remove("is-ready");
+            button.classList.remove("is-stale");
             button.setAttribute("aria-disabled", "true");
             if (stateLabel) {
                 stateLabel.textContent = "Locked";
@@ -1546,16 +2291,116 @@ function explainLockedView(viewName) {
     }
 }
 
-function openSidebar() {
-    element("sidebar").classList.add("is-open");
-    element("sidebarBackdrop").classList.add("is-open");
-    element("menuButton").setAttribute("aria-expanded", "true");
+function compactSidebarIsActive() {
+    return window.matchMedia && window.matchMedia("(max-width: 1080px)").matches;
 }
 
-function closeSidebar() {
+function setMainInert(isInert) {
+    var main = element("appMain");
+    if (!main) {
+        return;
+    }
+    if ("inert" in main) {
+        main.inert = isInert;
+    } else if (isInert) {
+        main.setAttribute("aria-hidden", "true");
+    } else {
+        main.removeAttribute("aria-hidden");
+    }
+}
+
+function openSidebar() {
+    if (!compactSidebarIsActive()) {
+        return;
+    }
+    appState.drawerReturnFocus = document.activeElement;
+    element("sidebar").classList.add("is-open");
+    element("sidebar").setAttribute("aria-hidden", "false");
+    element("sidebarBackdrop").classList.add("is-open");
+    element("sidebarBackdrop").setAttribute("aria-hidden", "false");
+    element("menuButton").setAttribute("aria-expanded", "true");
+    document.body.classList.add("drawer-open");
+    setMainInert(true);
+    element("sidebarClose").focus();
+}
+
+function closeSidebar(restoreFocus) {
+    var wasOpen = element("sidebar").classList.contains("is-open");
     element("sidebar").classList.remove("is-open");
     element("sidebarBackdrop").classList.remove("is-open");
+    element("sidebarBackdrop").setAttribute("aria-hidden", "true");
     element("menuButton").setAttribute("aria-expanded", "false");
+    document.body.classList.remove("drawer-open");
+    setMainInert(false);
+
+    if (compactSidebarIsActive()) {
+        element("sidebar").setAttribute("aria-hidden", "true");
+    } else {
+        element("sidebar").removeAttribute("aria-hidden");
+    }
+
+    if (wasOpen && restoreFocus !== false && appState.drawerReturnFocus &&
+            typeof appState.drawerReturnFocus.focus === "function") {
+        appState.drawerReturnFocus.focus();
+    }
+    appState.drawerReturnFocus = null;
+}
+
+function syncSidebarAccessibility() {
+    if (compactSidebarIsActive()) {
+        if (!element("sidebar").classList.contains("is-open")) {
+            element("sidebar").setAttribute("aria-hidden", "true");
+        }
+    } else {
+        closeSidebar(false);
+        element("sidebar").removeAttribute("aria-hidden");
+    }
+}
+
+function handleDrawerKeydown(keyEvent) {
+    if (!element("sidebar").classList.contains("is-open")) {
+        return;
+    }
+    if (keyEvent.key === "Escape") {
+        keyEvent.preventDefault();
+        closeSidebar(true);
+        return;
+    }
+    if (keyEvent.key !== "Tab") {
+        return;
+    }
+
+    var focusable = element("sidebar").querySelectorAll(
+        "button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex='-1'])"
+    );
+    if (focusable.length === 0) {
+        keyEvent.preventDefault();
+        return;
+    }
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    if (keyEvent.shiftKey && document.activeElement === first) {
+        keyEvent.preventDefault();
+        last.focus();
+    } else if (!keyEvent.shiftKey && document.activeElement === last) {
+        keyEvent.preventDefault();
+        first.focus();
+    }
+}
+
+function handleLocationNavigation() {
+    if (!appState.ready) {
+        return;
+    }
+    var viewName = viewNameFromHash();
+    if (!viewName || viewName === appState.currentView) {
+        return;
+    }
+    if (isViewUnlocked(viewName)) {
+        showView(viewName, { updateHash: false, focus: true });
+    } else {
+        explainLockedView(viewName);
+    }
 }
 
 // Connect every sidebar button and every in-page shortcut button.
@@ -1571,8 +2416,13 @@ function connectNavigation() {
     }
 
     element("menuButton").addEventListener("click", openSidebar);
-    element("sidebarClose").addEventListener("click", closeSidebar);
-    element("sidebarBackdrop").addEventListener("click", closeSidebar);
+    element("sidebarClose").addEventListener("click", function () { closeSidebar(true); });
+    element("sidebarBackdrop").addEventListener("click", function () { closeSidebar(true); });
+    document.addEventListener("keydown", handleDrawerKeydown);
+    window.addEventListener("resize", syncSidebarAccessibility);
+    window.addEventListener("popstate", handleLocationNavigation);
+    window.addEventListener("hashchange", handleLocationNavigation);
+    syncSidebarAccessibility();
 }
 
 function connectNavButton(button) {
@@ -1656,6 +2506,7 @@ function showChatSuggestions(suggestionList) {
     for (var index = 0; index < suggestionList.length; index++) {
         holder.appendChild(createChatChip(suggestionList[index]));
     }
+    refreshWorkflowControls();
 }
 
 function createChatChip(questionText) {
@@ -1663,6 +2514,7 @@ function createChatChip(questionText) {
     chip.type = "button";
     chip.className = "chat-chip";
     chip.textContent = questionText;
+    chip.disabled = !appState.ready || appState.pending.chat;
 
     chip.addEventListener("click", function () {
         element("chatInput").value = questionText;
@@ -1674,15 +2526,37 @@ function createChatChip(questionText) {
 
 // Write the first assistant message when the page opens.
 function startChatConversation() {
+    if (appState.chatStarted) {
+        return;
+    }
+    appState.chatStarted = true;
+    clearElement(element("chatLog"));
+    var assistedMode = aiAssistedModeAvailable(appState.aiInfo);
+    var degradedMode = Boolean(appState.aiInfo && appState.aiInfo.enabled === true && !assistedMode);
+    var greetingText = "Hello. I answer questions about this planner using fixed rules and the same verified data it shows elsewhere.";
+    var modeDetailText = "Rule-based mode understands the topics listed in the chips below.";
+    var sourceText = "Language-model wording is off; answers are generated by fixed rules.";
+
+    if (assistedMode) {
+        greetingText = "Hello. I answer questions from this planner's verified data, with optional language-model help for wording.";
+        modeDetailText = "The language model may reword an answer, but the listed figures still come from the planner.";
+        sourceText = "Assisted wording is enabled; it does not create or change the underlying numbers.";
+    } else if (degradedMode) {
+        greetingText = "Hello. Language-model assistance is enabled but unavailable, so I am using the planner's fixed-rule fallback.";
+        modeDetailText = appState.aiInfo.configuration_valid ?
+            "The language-model service is unavailable; fixed rules keep the verified dataset and model values usable." :
+            "The language-model configuration is incomplete or invalid; fixed rules keep the verified dataset and model values usable.";
+        sourceText = "Fixed-rule fallback is active; no language-model wording is being used.";
+    }
     addChatMessage(
         "assistant",
-        "Hello. I answer questions about this planner using the same real numbers it shows everywhere else.",
+        greetingText,
         [
             "Ask about the dataset, the model scores, or the allocation method.",
-            "Name a hospital to get its record, its prediction or its history, for example 'predict hospital 12'.",
-            "I use fixed rules, so I only understand the topics listed in the chips below."
+            "Name a hospital to get its record, its prediction or its dataset trends, for example 'predict hospital 12'.",
+            modeDetailText
         ],
-        "I am not a language model and I never invent a number."
+        sourceText
     );
 
     showChatSuggestions([
@@ -1697,18 +2571,24 @@ function startChatConversation() {
 
 function handleChatSubmit(submitEvent) {
     submitEvent.preventDefault();
+    if (!appState.ready || appState.pending.chat) {
+        return;
+    }
     var questionText = element("chatInput").value.trim();
     sendChatQuestion(questionText);
 }
 
 function sendChatQuestion(questionText) {
-    if (questionText === "") {
+    if (questionText === "" || !appState.ready || appState.pending.chat) {
         return;
     }
 
     addChatMessage("you", questionText, [], "");
     element("chatInput").value = "";
+    var requestTicket = beginRequest("chat");
+    appState.pending.chat = true;
     setButtonLoading("chatSendButton", true, "Send");
+    refreshWorkflowControls();
 
     var requestBody = { message: questionText };
     var hospitalValue = element(crisisFields.hospital).value;
@@ -1716,7 +2596,10 @@ function sendChatQuestion(questionText) {
         requestBody.selected_hospital_id = Number(hospitalValue);
     }
 
-    requestApi("/api/chat", "POST", requestBody).then(function (reply) {
+    requestApi("/api/chat", "POST", requestBody, requestTicket.signal).then(function (reply) {
+        if (!requestIsCurrent("chat", requestTicket)) {
+            return null;
+        }
         var sourceText = reply.source_note;
         if (reply.ai_error) {
             sourceText = sourceText + " The language model was not used: " + reply.ai_error;
@@ -1726,10 +2609,18 @@ function sendChatQuestion(questionText) {
             showChatSuggestions(reply.suggestions);
         }
     }).catch(function (error) {
-        addChatMessage("assistant", "I could not answer that question.", [error.message], "");
+        if (!isAbortError(error) && requestIsCurrent("chat", requestTicket)) {
+            addChatMessage("assistant", "I could not answer that question.", [error.message], "");
+        }
     }).then(function () {
-        setButtonLoading("chatSendButton", false, "Send");
-        element("chatInput").focus();
+        if (finishRequest("chat", requestTicket)) {
+            appState.pending.chat = false;
+            setButtonLoading("chatSendButton", false, "Send");
+            refreshWorkflowControls();
+            if (appState.currentView === "assistant") {
+                element("chatInput").focus();
+            }
+        }
     });
 }
 

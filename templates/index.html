@@ -3,7 +3,9 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>CityCare Recovery Planner</title>
+    <meta name="description" content="A private, competition-safe hospital disruption decision-support prototype maintained under the AIONEX product brand.">
+    <title>CityCare Recovery Planner · AIONEX Preview</title>
+    <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}" type="image/svg+xml">
     <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 </head>
 <body>
@@ -15,21 +17,25 @@
     <!-- ================================================================== -->
     <!-- LEFT SIDEBAR: BRAND, SECTION NAVIGATION, HONESTY BADGE             -->
     <!-- ================================================================== -->
-    <aside class="sidebar" id="sidebar">
+    <aside class="sidebar" id="sidebar" aria-label="CityCare planner navigation">
         <div class="sidebar-brand">
-            <span class="brand-mark" aria-hidden="true">+</span>
+            <span class="brand-mark" aria-hidden="true">
+                <svg viewBox="0 0 24 24" focusable="false"><path d="M10 4h4v6h6v4h-6v6h-4v-6H4v-4h6z"></path></svg>
+            </span>
             <span class="brand-text">
                 <strong>CityCare</strong>
                 <small>Recovery Planner</small>
             </span>
-            <button type="button" class="sidebar-close" id="sidebarClose" aria-label="Close the menu">&times;</button>
+            <button type="button" class="sidebar-close" id="sidebarClose" aria-label="Close the menu">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="m6.7 5.3 5.3 5.3 5.3-5.3 1.4 1.4-5.3 5.3 5.3 5.3-1.4 1.4-5.3-5.3-5.3 5.3-1.4-1.4 5.3-5.3-5.3-5.3z"></path></svg>
+            </button>
         </div>
 
         <nav class="sidebar-nav" id="sidebarNav" aria-label="Planner sections">
 
             <p class="nav-group-title">Start here</p>
             <button type="button" class="nav-item" data-view="overview">
-                <span class="nav-icon" aria-hidden="true">&#9636;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 4h7v7H4zm9 0h7v7h-7zM4 13h7v7H4zm9 0h7v7h-7z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Dataset Overview</span>
                     <span class="nav-hint">What the data contains</span>
@@ -38,7 +44,7 @@
 
             <p class="nav-group-title">Step 1 &middot; Situation</p>
             <button type="button" class="nav-item" data-view="analysis">
-                <span class="nav-icon" aria-hidden="true">&#9873;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M5 3h2v18H5zm3 2h10l-2 4 2 4H8z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Crisis Situation</span>
                     <span class="nav-hint">Describe what is happening</span>
@@ -47,64 +53,64 @@
 
             <p class="nav-group-title">Step 2 &middot; Prediction</p>
             <button type="button" class="nav-item" data-view="results" data-requires="prediction">
-                <span class="nav-icon" aria-hidden="true">&#9650;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 19h16v2H4zm2-3 4-5 3 3 5-8 2 1-7 11-3-3-3 3z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Prediction Results</span>
                     <span class="nav-hint">What the model expects</span>
                 </span>
-                <span class="nav-state" aria-hidden="true"></span>
+                <span class="nav-state"></span>
             </button>
             <button type="button" class="nav-item" data-view="strategies" data-requires="prediction">
-                <span class="nav-icon" aria-hidden="true">&#9873;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M12 2 4 5v6c0 5 3.4 9.7 8 11 4.6-1.3 8-6 8-11V5zm-1 15-4-4 1.4-1.4L11 14.2l5.6-5.6L18 10z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Recovery Strategies</span>
                     <span class="nav-hint">Suggested actions</span>
                 </span>
-                <span class="nav-state" aria-hidden="true"></span>
+                <span class="nav-state"></span>
             </button>
             <button type="button" class="nav-item" data-view="decisions" data-requires="prediction">
-                <span class="nav-icon" aria-hidden="true">&#10003;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M9.2 18 3.5 12.3l1.4-1.4 4.3 4.3L19.1 5.3l1.4 1.4z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Decision Points</span>
                     <span class="nav-hint">Trade-offs to weigh</span>
                 </span>
-                <span class="nav-state" aria-hidden="true"></span>
+                <span class="nav-state"></span>
             </button>
 
             <p class="nav-group-title">Step 3 &middot; Resources</p>
             <button type="button" class="nav-item" data-view="reserve">
-                <span class="nav-icon" aria-hidden="true">&#9878;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 7h18v13H3zm2 2v9h14V9zm4-6h6l2 3H7zm2 8h2v5h-2z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Emergency Reserve</span>
                     <span class="nav-hint">Enter what you really have</span>
                 </span>
             </button>
             <button type="button" class="nav-item" data-view="allocation" data-requires="allocation">
-                <span class="nav-icon" aria-hidden="true">&#9783;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 5h3v3H4zm5 0h11v3H9zm-5 6h3v3H4zm5 0h11v3H9zm-5 6h3v3H4zm5 0h11v3H9z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Allocation Report</span>
                     <span class="nav-hint">Who receives what</span>
                 </span>
-                <span class="nav-state" aria-hidden="true"></span>
+                <span class="nav-state"></span>
             </button>
 
             <p class="nav-group-title">Reference</p>
             <button type="button" class="nav-item" data-view="resilience">
-                <span class="nav-icon" aria-hidden="true">&#9711;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M3 13h4l2-6 4 11 2-5h6v2h-4.6L13 22 9.2 12 8.4 15H3z"></path></svg></span>
                 <span class="nav-text">
-                    <span class="nav-label">Resilience &amp; History</span>
-                    <span class="nav-hint">Real weekly trends</span>
+                    <span class="nav-label">Resilience &amp; Trends</span>
+                    <span class="nav-hint">Weekly dataset trends</span>
                 </span>
             </button>
             <button type="button" class="nav-item" data-view="model">
-                <span class="nav-icon" aria-hidden="true">&#9881;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 6h10v2H4zm14-2h2v6h-2zM10 11h10v2H10zm-6-2h2v6H4zm0 7h10v2H4zm14-2h2v6h-2z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Model Quality</span>
                     <span class="nav-hint">Honest test scores</span>
                 </span>
             </button>
             <button type="button" class="nav-item" data-view="assistant">
-                <span class="nav-icon" aria-hidden="true">&#9993;</span>
+                <span class="nav-icon" aria-hidden="true"><svg viewBox="0 0 24 24" focusable="false"><path d="M4 4h16v13H8l-4 4zm2 2v10.2L7.2 15H18V6zm3 3h6v2H9zm0 4h4v2H9z"></path></svg></span>
                 <span class="nav-text">
                     <span class="nav-label">Assistant</span>
                     <span class="nav-hint">Ask about any number</span>
@@ -113,21 +119,21 @@
         </nav>
 
         <div class="sidebar-foot">
-            <span class="badge badge-dataset">Historical dataset &mdash; not live</span>
+            <span class="badge badge-dataset">Configured dataset &mdash; not live</span>
             <p>Decision-support prototype. Not a live hospital system and not medical advice.</p>
         </div>
     </aside>
 
-    <div class="sidebar-backdrop" id="sidebarBackdrop"></div>
+    <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
 
     <!-- ================================================================== -->
     <!-- RIGHT SIDE: TOP BAR AND THE ACTIVE VIEW                            -->
     <!-- ================================================================== -->
-    <div class="app-main">
+    <div class="app-main" id="appMain">
 
         <header class="topbar">
-            <button type="button" class="menu-button" id="menuButton" aria-label="Open the menu" aria-expanded="false">
-                <span aria-hidden="true">&#9776;</span>
+            <button type="button" class="menu-button" id="menuButton" aria-label="Open the menu" aria-expanded="false" aria-controls="sidebar">
+                <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 6h16v2H4zm0 5h16v2H4zm0 5h16v2H4z"></path></svg>
             </button>
             <div class="topbar-title">
                 <h1 id="topbarTitle">Dataset Overview</h1>
@@ -139,9 +145,24 @@
             </div>
         </header>
 
-        <div id="appStatusBanner" class="message-box message-error hidden" role="alert"></div>
+        <div id="appStatusBanner" class="message-box message-info" role="status" aria-live="polite">
+            <strong>Preparing the recovery planner</strong>
+            <span>Loading the dataset, model status and hospital options&hellip;</span>
+        </div>
 
-        <main class="view-host" id="viewHost">
+        <section class="scenario-strip hidden" id="scenarioStrip" aria-label="Active scenario status">
+            <div class="scenario-identity">
+                <span class="scenario-eyebrow">Active scenario</span>
+                <strong id="scenarioHospital">No hospital selected</strong>
+            </div>
+            <dl class="scenario-facts">
+                <div><dt>Scenario time</dt><dd id="scenarioTimestamp">&mdash;</dd></div>
+                <div><dt>Data basis</dt><dd id="scenarioBasis">Loading&hellip;</dd></div>
+            </dl>
+            <span class="scenario-state is-draft" id="scenarioState" role="status" aria-live="polite">Draft &middot; not analyzed</span>
+        </section>
+
+        <main class="view-host" id="viewHost" tabindex="-1">
 
             <!-- ============================================================ -->
             <!-- VIEW 1: DATASET OVERVIEW                                     -->
@@ -165,7 +186,7 @@
                     <div class="stat-card">
                         <span class="stat-label">Hospitals</span>
                         <span class="stat-value" id="statHospitals">&mdash;</span>
-                        <span class="stat-foot">Real dataset identifiers</span>
+                        <span class="stat-foot">Configured dataset identifiers</span>
                     </div>
                     <div class="stat-card">
                         <span class="stat-label">Covered period</span>
@@ -212,7 +233,7 @@
                     <h2>Crisis Situation Input</h2>
                     <p class="view-purpose">
                         <strong>What this view does:</strong> it collects the current condition of one hospital.
-                        Load the latest real record first, then change only the values that are different right now.
+                        Load the latest dataset record first, then change any values needed for the scenario you are assessing.
                     </p>
                 </div>
 
@@ -223,8 +244,8 @@
                         <div class="field-grid">
                             <div class="field">
                                 <label for="hospitalSelect">Hospital</label>
-                                <select id="hospitalSelect" name="hospitalSelect" required></select>
-                                <small class="helper">Hospitals are named from their real dataset identifier.</small>
+                                <select id="hospitalSelect" name="hospitalSelect" required disabled></select>
+                                <small class="helper">Hospitals are named from their configured dataset identifier.</small>
                             </div>
                             <div class="field">
                                 <label for="incidentTimestamp">Date and time</label>
@@ -316,8 +337,8 @@
                     <div id="formErrorBox" class="message-box message-error hidden" role="alert"></div>
 
                     <div class="form-actions">
-                        <button type="submit" id="analyzeButton" class="button button-primary">Analyze Crisis and Build Recovery Plan</button>
-                        <button type="button" id="loadLatestButton" class="button button-secondary">Load Latest Dataset Record</button>
+                        <button type="submit" id="analyzeButton" class="button button-primary" disabled>Analyze Crisis and Build Recovery Plan</button>
+                        <button type="button" id="loadLatestButton" class="button button-secondary" disabled>Load Latest Dataset Record</button>
                     </div>
                     <p class="record-note">
                         <span class="badge badge-dataset">Latest dataset record</span>
@@ -346,6 +367,19 @@
                 </div>
 
                 <div id="resultsContent" class="hidden">
+                    <div id="predictionStaleNotice" class="message-box message-warning stale-notice hidden" role="status">
+                        <strong>This prediction is no longer current</strong>
+                        <span id="predictionStaleText">The scenario changed after this result was calculated.</span>
+                        <button type="button" class="button button-secondary" data-goto="analysis">Review and analyze again</button>
+                    </div>
+
+                    <div class="result-provenance" id="resultProvenance" role="note" aria-label="Prediction provenance">
+                        <div><span>Hospital</span><strong id="resultProvenanceHospital">&mdash;</strong></div>
+                        <div><span>Scenario time</span><strong id="resultProvenanceTimestamp">&mdash;</strong></div>
+                        <div><span>Result received</span><strong id="resultProvenanceReceived">&mdash;</strong></div>
+                        <div><span>Basis</span><strong id="resultProvenanceBasis">Step 1 snapshot</strong></div>
+                    </div>
+
                     <div id="rangeWarningsBox" class="message-box message-warning hidden" role="status">
                         <strong>Input range notices</strong>
                         <ul id="rangeWarningsList"></ul>
@@ -432,9 +466,20 @@
                         <article class="card">
                             <h3>Predicted resource requirement</h3>
                             <p class="card-sub">Bar heights come directly from the prediction above.</p>
-                            <div class="chart-holder">
+                            <div class="chart-holder" id="resourceChartHolder">
                                 <canvas id="resourceChart" height="250" aria-label="Predicted resource requirement chart" role="img"></canvas>
                             </div>
+                            <div id="resourceChartNotice" class="message-box message-info chart-notice hidden" role="status"></div>
+                            <details class="chart-data-details" id="resourceDataDetails">
+                                <summary>View prediction values as a table</summary>
+                                <div class="table-scroll" tabindex="0" aria-label="Prediction values table">
+                                    <table class="data-table">
+                                        <caption>Accessible data used in the predicted resource requirement chart.</caption>
+                                        <thead><tr><th scope="col">Resource</th><th scope="col">Predicted units</th></tr></thead>
+                                        <tbody id="resourceDataTableBody"></tbody>
+                                    </table>
+                                </div>
+                            </details>
                         </article>
                     </div>
 
@@ -443,16 +488,16 @@
                             <h3>Main pressure factors</h3>
                             <p class="card-sub">
                                 Current factors associated with higher operational pressure. These compare your input
-                                with real dataset medians. They are not causal explanations.
+                                with training-set medians. They are not causal explanations.
                             </p>
                             <ul class="factor-list" id="pressureFactorsList"></ul>
                         </article>
 
                         <article class="card">
-                            <h3>Outcomes in Similar Historical Cases</h3>
+                            <h3>Outcomes in Similar Dataset Records</h3>
                             <p class="card-sub" id="similarFilterNote">&mdash;</p>
                             <div id="similarCasesEmpty" class="empty-state hidden">
-                                <p>No comparable historical record was found.</p>
+                                <p>No comparable dataset record was found.</p>
                             </div>
                             <dl class="detail-list" id="similarCasesList">
                                 <div class="detail-row"><dt>Similar records found</dt><dd id="similarCount">&mdash;</dd></div>
@@ -490,28 +535,28 @@
 
                 <div id="strategiesEmpty" class="empty-state">
                     <p class="empty-title">No strategies yet</p>
-                    <p>Strategies are written from a real prediction, so run an analysis first.</p>
+                    <p>Strategies are written from the current prediction result, so run an analysis first.</p>
                     <button type="button" class="button button-secondary" data-goto="analysis">Go to Step 1</button>
                 </div>
 
                 <div id="strategiesContent" class="strategy-grid hidden">
                     <article class="card strategy-card strategy-now">
-                        <h3><span aria-hidden="true">&#9679;</span> Act Now</h3>
+                        <h3><span class="strategy-dot" aria-hidden="true"></span> Act Now</h3>
                         <p class="card-sub">Highest urgency, based on the predicted status.</p>
                         <ul id="strategyActNow"></ul>
                     </article>
                     <article class="card strategy-card strategy-prepare">
-                        <h3><span aria-hidden="true">&#9679;</span> Prepare for the Next Two Hours</h3>
+                        <h3><span class="strategy-dot" aria-hidden="true"></span> Prepare for the Next Two Hours</h3>
                         <p class="card-sub">Matched to the predicted resource requirement.</p>
                         <ul id="strategyPrepare"></ul>
                     </article>
                     <article class="card strategy-card strategy-watch">
-                        <h3><span aria-hidden="true">&#9679;</span> Watch Closely</h3>
+                        <h3><span class="strategy-dot" aria-hidden="true"></span> Watch Closely</h3>
                         <p class="card-sub">Indicators most likely to change the picture.</p>
                         <ul id="strategyWatch"></ul>
                     </article>
                     <article class="card strategy-card strategy-coordinate">
-                        <h3><span aria-hidden="true">&#9679;</span> Coordinate</h3>
+                        <h3><span class="strategy-dot" aria-hidden="true"></span> Coordinate</h3>
                         <p class="card-sub">Possible partners and the checks they still need.</p>
                         <ul id="strategyCoordinate"></ul>
                     </article>
@@ -533,7 +578,7 @@
 
                 <div id="decisionsEmpty" class="empty-state">
                     <p class="empty-title">No recommendations yet</p>
-                    <p>Run an analysis and these decision points will be written from its real output.</p>
+                    <p>Run an analysis and these decision points will be written from its current output.</p>
                     <button type="button" class="button button-secondary" data-goto="analysis">Go to Step 1</button>
                 </div>
 
@@ -630,7 +675,7 @@
                     <div id="allocationErrorBox" class="message-box message-error hidden" role="alert"></div>
 
                     <div class="form-actions">
-                        <button type="submit" id="buildAllocationButton" class="button button-primary">Build Allocation Plan</button>
+                        <button type="submit" id="buildAllocationButton" class="button button-primary" disabled>Build Allocation Plan</button>
                         <button type="button" id="downloadAllocationButton" class="button button-secondary" disabled>Download Allocation Report as CSV</button>
                     </div>
                 </form>
@@ -656,6 +701,12 @@
                 </div>
 
                 <div id="allocationContent" class="hidden">
+                    <div id="allocationStaleNotice" class="message-box message-warning stale-notice hidden" role="status">
+                        <strong>This allocation report is no longer current</strong>
+                        <span id="allocationStaleText">The reserve, priorities or selected scenario changed after this report was built.</span>
+                        <button type="button" class="button button-secondary" data-goto="reserve">Review and rebuild the plan</button>
+                    </div>
+
                     <div class="stat-grid">
                         <div class="stat-card">
                             <span class="stat-label">ICU beds allocated</span>
@@ -691,10 +742,10 @@
 
                     <div class="table-toolbar">
                         <p class="table-toolbar-text" id="allocationTableNote">&mdash;</p>
-                        <button type="button" class="button button-secondary" id="toggleAllocationRows">Show all hospitals</button>
+                        <button type="button" class="button button-secondary" id="toggleAllocationRows" aria-controls="allocationTableBody" aria-expanded="false">Show all hospitals</button>
                     </div>
 
-                    <div class="table-scroll">
+                    <div class="table-scroll" tabindex="0" aria-label="Allocation report table; scroll horizontally for all columns">
                         <table class="data-table table-wide">
                             <caption>Recommended allocation of the entered emergency reserve, ranked by multi-objective operational priority score.</caption>
                             <thead>
@@ -734,12 +785,12 @@
             <!-- ============================================================ -->
             <!-- VIEW 8: RESILIENCE AND SUSTAINABILITY ANALYSIS               -->
             <!-- ============================================================ -->
-            <section class="view" id="view-resilience" data-title="Resilience &amp; History">
+            <section class="view" id="view-resilience" data-title="Resilience &amp; Trends">
                 <div class="view-head">
                     <p class="view-step">Reference</p>
                     <h2>Resilience and Sustainability Analysis</h2>
                     <p class="view-purpose">
-                        <strong>What this view does:</strong> it shows the real weekly history of
+                        <strong>What this view does:</strong> it shows weekly dataset trends for
                         <span id="historyHospitalLabel">the selected hospital</span>, so you can see whether pressure
                         has been building over time.
                     </p>
@@ -747,11 +798,11 @@
 
                 <div class="message-box message-info">
                     The dataset contains a validated two-hour prediction target. The sustainability panel therefore
-                    reports real historical trends rather than inventing unsupported long-term forecasts.
+                    reports weekly trends from configured dataset records rather than inventing unsupported long-term forecasts.
                 </div>
 
                 <div id="historyEmpty" class="empty-state hidden">
-                    <p class="empty-title">No historical records</p>
+                    <p class="empty-title">No dataset records</p>
                     <p>No rows were found for this hospital.</p>
                 </div>
 
@@ -791,22 +842,45 @@
                         </div>
                     </div>
 
+                    <div id="historyChartNotice" class="message-box message-info chart-notice hidden" role="status"></div>
+
                     <div class="two-column">
                         <article class="card">
-                            <h3>Historical pressure indicators</h3>
-                            <p class="card-sub">Real weekly averages from the dataset. The vertical axis is a percentage.</p>
+                            <h3>Dataset pressure indicators</h3>
+                            <p class="card-sub">Weekly averages from the configured dataset. The vertical axis is a percentage.</p>
                             <div class="chart-holder">
-                                <canvas id="historyRiskChart" height="260" aria-label="Historical overload risk, bed occupancy and ICU occupancy" role="img"></canvas>
+                                <canvas id="historyRiskChart" height="260" aria-label="Dataset overload risk, bed occupancy and ICU occupancy by week" role="img"></canvas>
                             </div>
                         </article>
                         <article class="card">
-                            <h3>Historical resource requirements</h3>
-                            <p class="card-sub">Real weekly averages of the recorded requirement columns.</p>
+                            <h3>Dataset resource requirements</h3>
+                            <p class="card-sub">Weekly averages of the recorded requirement columns.</p>
                             <div class="chart-holder">
-                                <canvas id="historyResourceChart" height="260" aria-label="Historical ICU, ventilator and staff requirements" role="img"></canvas>
+                                <canvas id="historyResourceChart" height="260" aria-label="Dataset ICU, ventilator and staff requirements by week" role="img"></canvas>
                             </div>
                         </article>
                     </div>
+
+                    <details class="chart-data-details" id="historyDataDetails">
+                        <summary>View weekly dataset values as a table</summary>
+                        <div class="table-scroll" tabindex="0" aria-label="Weekly dataset values table; scroll horizontally for all columns">
+                            <table class="data-table table-wide">
+                                <caption>Accessible weekly values used in both dataset trend charts.</caption>
+                                <thead>
+                                    <tr>
+                                        <th scope="col">Week beginning</th>
+                                        <th scope="col">Overload risk %</th>
+                                        <th scope="col">Bed occupancy %</th>
+                                        <th scope="col">ICU occupancy %</th>
+                                        <th scope="col">ICU beds</th>
+                                        <th scope="col">Ventilators</th>
+                                        <th scope="col">Staff</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="historyDataTableBody"></tbody>
+                            </table>
+                        </div>
+                    </details>
 
                     <p class="small-note" id="trendThresholdNote">&mdash;</p>
                 </div>
@@ -865,7 +939,7 @@
                             R&sup2; shows how much of the variation the model explains, where 1.0 is perfect.
                             MAE is the average error in the unit of that target.
                         </p>
-                        <div class="table-scroll">
+                        <div class="table-scroll" tabindex="0" aria-label="Regression quality table">
                             <table class="data-table">
                                 <thead>
                                     <tr>
@@ -904,10 +978,10 @@
                         <p><strong>Method label:</strong> <span id="methodologyLabelText">&mdash;</span></p>
                         <p><strong>Columns excluded from the model inputs:</strong> <span id="excludedColumnsText">&mdash;</span></p>
                         <p><strong>Per-status recall on the test period:</strong> <span id="perClassRecallText">&mdash;</span></p>
-                        <p><strong>Confusion matrix (rows are the real status, columns are the predicted status):</strong></p>
-                        <div class="table-scroll">
+                        <p><strong>Confusion matrix (rows are the observed status, columns are the predicted status):</strong></p>
+                        <div class="table-scroll" tabindex="0" aria-label="Capacity-status confusion matrix">
                             <table class="data-table">
-                                <thead><tr id="confusionHeadRow"><th scope="col">Real status</th></tr></thead>
+                                <thead><tr id="confusionHeadRow"><th scope="col">Observed status</th></tr></thead>
                                 <tbody id="confusionTableBody"></tbody>
                             </table>
                         </div>
@@ -922,7 +996,8 @@
                 <article class="card limitations-card">
                     <h3>Important scientific and operational limitations</h3>
                     <ul class="plain-list">
-                        <li>The CSV contains historical or generated dataset records and is not a live hospital connection.</li>
+                        <li>The configured CSV contains timestamped dataset records and is not a live hospital connection.</li>
+                        <li>The repository's generated demo dataset contains synthetic scenarios and does not represent real hospitals.</li>
                         <li>The validated prediction horizon is two hours.</li>
                         <li>The model cannot confirm actual physical bed or ventilator inventory.</li>
                         <li>Resource allocations refer only to the emergency reserve entered by the user.</li>
@@ -942,7 +1017,7 @@
                     <h2>Planner Assistant</h2>
                     <p class="view-purpose">
                         <strong>What this view does:</strong> it answers questions about the dataset, a specific
-                        hospital, the model scores and the allocation method, using the same real numbers as the rest
+                        hospital, the model scores and the allocation method, using the same dataset and model values as the rest
                         of the planner.
                     </p>
                 </div>
@@ -959,9 +1034,9 @@
 
                     <form class="chat-form" id="chatForm" novalidate>
                         <label class="sr-only" for="chatInput">Your question for the assistant</label>
-                        <input type="text" id="chatInput" name="chatInput" maxlength="400" autocomplete="off"
+                        <input type="text" id="chatInput" name="chatInput" maxlength="400" autocomplete="off" disabled
                                placeholder="Ask about the dataset, a hospital number, or the model">
-                        <button type="submit" id="chatSendButton" class="button button-primary">Send</button>
+                        <button type="submit" id="chatSendButton" class="button button-primary" disabled>Send</button>
                     </form>
 
                     <p class="chat-note">
@@ -977,20 +1052,21 @@
 
         <footer class="app-footer">
             <p class="footer-title">CityCare Recovery Planner</p>
+            <p>Private competition-safe engineering preview maintained under the AIONEX product brand. No organizer endorsement is claimed.</p>
             <p>
                 Healthcare Recovery Module for the Autonomous City Recovery Planner &mdash; Innoverse AI Challenge #17.
                 Hospital resource allocation, patient-demand prediction, overload detection, disruption response,
-                operational resilience analysis and decision recommendations, built only from the supplied dataset.
+                operational resilience analysis and decision recommendations, built from the configured dataset.
             </p>
             <p class="footer-disclaimer">
-                This system uses historical dataset records and machine-learning forecasts. It is an operational
+                This system uses timestamped dataset records and machine-learning forecasts. It is an operational
                 decision-support prototype, not a live hospital system or medical advice.
             </p>
         </footer>
     </div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script id="chartJsScript" async src="{{ url_for('static', filename='vendor/chart.umd.js') }}"></script>
 <script src="{{ url_for('static', filename='script.js') }}"></script>
 </body>
 </html>
