@@ -8,11 +8,11 @@ This repository is **not publicly licensed**, **not a live hospital system**, **
 
 ## Product preview
 
-![CityCare overview](docs/assets/screenshots/overview.png)
+![CityCare overview](docs/assets/screenshots/overview.jpg)
 
 | Scenario planning | Responsive operation |
 | --- | --- |
-| ![Prediction and recovery plan](docs/assets/screenshots/planner.png) | ![Mobile navigation](docs/assets/screenshots/mobile.png) |
+| ![Prediction and recovery plan](docs/assets/screenshots/planner.jpg) | ![Mobile navigation](docs/assets/screenshots/mobile.jpg) |
 
 The screenshots use the repository-generated synthetic demo dataset. They do not represent real hospitals, patients, incidents, or outcomes.
 
