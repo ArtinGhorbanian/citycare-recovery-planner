@@ -1,0 +1,56 @@
+name: Question
+description: Ask a reproducible technical or project-scope question.
+title: "[Question]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This tracker does not provide clinical advice or emergency support. Do not
+        disclose secrets, patient information, or restricted competition material.
+        Report vulnerabilities privately as described in SECURITY.md.
+
+  - type: dropdown
+    id: topic
+    attributes:
+      label: Topic
+      options:
+        - Local setup and configuration
+        - Synthetic demo data
+        - Model or allocation behavior
+        - Interface and accessibility
+        - Testing and contribution workflow
+        - Repository scope or documentation
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: State the specific outcome or concept you need help with.
+    validations:
+      required: true
+
+  - type: textarea
+    id: attempted
+    attributes:
+      label: What you already tried
+      description: Include relevant commands and sanitized results.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Environment and context
+      description: Include revision, operating system, Python version, and browser when relevant.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Confirmation
+      options:
+        - label: I have not included credentials, personal data, or restricted material.
+          required: true
+        - label: This is not an emergency, clinical-support, or vulnerability request.
+          required: true

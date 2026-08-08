@@ -1,0 +1,100 @@
+name: Bug report
+description: Report a reproducible defect in the local planning prototype.
+title: "[Bug]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve the prototype. Do not include credentials,
+        private competition material, patient data, or other sensitive records.
+        Security vulnerabilities belong in a private security advisory, not here.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Application startup or configuration
+        - Situation input and prediction
+        - Allocation planning
+        - History, model insight, or exports
+        - Interface or accessibility
+        - Synthetic data generator
+        - Documentation or repository tooling
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: Briefly describe the defect and its impact.
+      placeholder: What went wrong?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Provide the smallest deterministic sequence that demonstrates the issue.
+      placeholder: |
+        1. Start the app with ...
+        2. Open ...
+        3. Select ...
+        4. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: input
+    id: revision
+    attributes:
+      label: Revision
+      description: Commit SHA, tag, or branch where the issue occurred.
+      placeholder: v0.1.0 or abc1234
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, Python version, and browser/version when relevant.
+      placeholder: Windows 11; Python 3.14.6; Firefox 142
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste only redacted logs, console errors, or screenshots that contain no secrets or sensitive data.
+      render: shell
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Pre-submission checks
+      options:
+        - label: I reproduced this with synthetic or otherwise authorized data.
+          required: true
+        - label: I removed secrets, personal data, and restricted competition material.
+          required: true
+        - label: This is not a vulnerability report or a request for clinical advice.
+          required: true

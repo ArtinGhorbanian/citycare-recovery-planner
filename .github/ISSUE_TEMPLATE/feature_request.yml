@@ -1,0 +1,64 @@
+name: Feature request
+description: Propose a scoped improvement to the planning prototype.
+title: "[Feature]: "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Proposals must remain compatible with the project's competition, data-rights,
+        privacy, and safety constraints. A proposal is not a commitment to implement it.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or user need
+      description: Describe the planning task or usability gap without prescribing a solution.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: audience
+    attributes:
+      label: Primary audience
+      options:
+        - Local evaluator or reviewer
+        - Emergency planning analyst
+        - Developer or maintainer
+        - Accessibility user
+        - Other non-clinical user
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed outcome
+      description: Explain what should become possible and how success could be verified.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Note workarounds or smaller approaches that were considered.
+
+  - type: textarea
+    id: risk
+    attributes:
+      label: Safety, privacy, security, and rights impact
+      description: Identify new data, external services, permissions, model behavior, or competition material involved.
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Scope checks
+      options:
+        - label: This request does not assume the prototype is suitable for clinical or emergency decisions.
+          required: true
+        - label: Any example data is synthetic, public-domain, or otherwise authorized for this use.
+          required: true
